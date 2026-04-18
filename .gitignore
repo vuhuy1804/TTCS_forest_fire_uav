@@ -1,0 +1,63 @@
+# =========================
+# OS / Editor
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# =========================
+# Logs
+# =========================
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# =========================
+# Frontend - React + Vite + Leaflet
+# =========================
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+frontend/.vite/
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
+frontend/*.local
+
+# =========================
+# Backend - Django + DRF
+# =========================
+backend/__pycache__/
+backend/*.py[cod]
+backend/db.sqlite3
+backend/*.sqlite3
+backend/.env
+backend/.env.*
+!backend/.env.example
+backend/.venv/
+backend/venv/
+backend/env/
+backend/staticfiles/
+backend/media/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.coverage
+backend/htmlcov/
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
