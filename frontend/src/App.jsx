@@ -409,6 +409,76 @@ export default function App() {
     };
   }, [state]);
 
+  const uavStatusList = useMemo(() => {
+    const cells = state?.cells || [];
+    const assignments = state?.assignments || [];
+    const routes = state?.routes || [];
+
+    const cellMap = new Map();
+    for (const cell of cells) {
+      cellMap.set(cell.id, cell);
+    }
+
+    const grouped = new Map();
+
+    for (const a of assignments) {
+      if (!a?.uav?.id || !a?.cell_id) continue;
+
+      const uavId = a.uav.id;
+      const cell = cellMap.get(a.cell_id);
+      if (!cell) continue;
+
+      if (!grouped.has(uavId)) {
+        grouped.set(uavId, {
+          uav: a.uav,
+          cells: [],
+        });
+      }
+
+      grouped.get(uavId).cells.push(cell);
+    }
+
+    const routeSet = new Set(routes.map((r) => r.uav_id));
+
+    const result = [];
+
+    for (const [, group] of grouped.entries()) {
+      const { uav, cells } = group;
+
+      let smokeCount = 0;
+      let fireCount = 0;
+      let latSum = 0;
+      let lngSum = 0;
+
+      for (const cell of cells) {
+        if (cell.label === 1) smokeCount += 1;
+        if (cell.label === 2) fireCount += 1;
+        latSum += cell.center.lat;
+        lngSum += cell.center.lng;
+      }
+
+      const centroid = cells.length
+        ? {
+            lat: latSum / cells.length,
+            lng: lngSum / cells.length,
+          }
+        : null;
+
+      result.push({
+        uav,
+        status: "planned",
+        assignedCells: cells.length,
+        smokeCount,
+        fireCount,
+        alertCount: smokeCount + fireCount,
+        centroid,
+        routeReady: routeSet.has(uav.id),
+      });
+    }
+
+    return result.sort((a, b) => a.uav.id - b.uav.id);
+  }, [state]);
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", height: "100vh" }}>
       <div style={{ padding: 12, borderRight: "1px solid #ddd" }}>
@@ -515,6 +585,67 @@ export default function App() {
               </span>
             </div>
           </div>
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontWeight: 600 }}>UAV Status</div>
+
+          {uavStatusList.length === 0 ? (
+            <div style={{ marginTop: 6, fontSize: 12, color: "#666" }}>
+              Chưa có dữ liệu UAV. Hãy tạo mission, chạy K-means và route.
+            </div>
+          ) : (
+            <div style={{ marginTop: 6, display: "grid", gap: 8 }}>
+              {uavStatusList.map((item) => (
+                <div
+                  key={item.uav.id}
+                  style={{
+                    padding: 8,
+                    border: "1px solid #ddd",
+                    fontSize: 12,
+                    background: "#fafafa",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                    <span
+                      style={{
+                        width: 12,
+                        height: 12,
+                        background: item.uav.color || "#3388ff",
+                        display: "inline-block",
+                        border: "1px solid #333",
+                      }}
+                    />
+                    <b>{item.uav.name}</b>
+                  </div>
+
+                  <div>UAV ID: {item.uav.id}</div>
+                  <div>Status: {item.status}</div>
+                  <div>Assigned Cells: {item.assignedCells}</div>
+                  <div>Smoke in Region: {item.smokeCount}</div>
+                  <div>Fire in Region: {item.fireCount}</div>
+                  <div>
+                    Alerts in Region:{" "}
+                    <span
+                      style={{
+                        color: item.alertCount > 0 ? "#cf1322" : "#389e0d",
+                        fontWeight: 700,
+                      }}
+                    >
+                      {item.alertCount}
+                    </span>
+                  </div>
+                  <div>Route: {item.routeReady ? "Ready" : "Not ready"}</div>
+                  <div>
+                    Centroid:{" "}
+                    {item.centroid
+                      ? `[${item.centroid.lat.toFixed(5)}, ${item.centroid.lng.toFixed(5)}]`
+                      : "N/A"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div style={{ marginTop: 12 }}>
