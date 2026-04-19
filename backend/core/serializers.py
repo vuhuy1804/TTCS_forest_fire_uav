@@ -14,7 +14,7 @@ class GridCellSerializer(serializers.ModelSerializer):
 class UAVSerializer(serializers.ModelSerializer):
     class Meta:
         model = UAV
-        fields = ["id", "name", "color", "status"]
+        fields = ["id", "name", "color", "status", "current_position", "current_waypoint_index", "battery_level", "last_seen_at", "route_direction"]
 
 class MissionSerializer(serializers.ModelSerializer):
     class Meta:

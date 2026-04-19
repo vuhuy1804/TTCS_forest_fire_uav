@@ -10,6 +10,9 @@ urlpatterns = [
     path("missions/<int:mission_id>/routes/", views.generate_routes),
     path("missions/<int:mission_id>/state/", views.mission_state),
     path("missions/<int:mission_id>/status/", views.update_mission_status),
+    path("missions/<int:mission_id>/tick/", views.simulate_mission_tick),
+    path("missions/<int:mission_id>/auto-simulation/", views.set_mission_auto_simulation),
+    path("missions/<int:mission_id>/restart/", views.restart_mission),
 
     path("detections/", views.ingest_detection),
 ]

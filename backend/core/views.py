@@ -2,6 +2,7 @@ from django.shortcuts import render
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from django.utils import timezone
 
 import numpy as np
 
@@ -283,20 +284,24 @@ def update_mission_status(request, mission_id: int):
     """
     Cập nhật trạng thái mission:
     draft | planned | running | paused | finished
-    Đồng thời cập nhật trạng thái UAV liên quan.
+
+    Logic:
+    - planned -> running: Start Mission (khởi tạo UAV từ waypoint đầu)
+    - paused -> running: Resume Mission (tiếp tục từ trạng thái hiện tại, không reset)
+    - running -> paused: Pause Mission
+    - * -> finished: Finish Mission (reset execution state)
     """
     allowed = ["draft", "planned", "running", "paused", "finished"]
     new_status = request.data.get("status")
 
     if new_status not in allowed:
-        return Response(
-            {"detail": f"status phải thuộc {allowed}"},
-            status=400,
-        )
+      return Response(
+          {"detail": f"status phải thuộc {allowed}"},
+          status=400,
+      )
 
     mission = Mission.objects.get(id=mission_id)
-    mission.status = new_status
-    mission.save(update_fields=["status"])
+    old_status = mission.status
 
     used_uav_ids = list(
         ClusterAssignment.objects.filter(mission=mission)
@@ -304,6 +309,11 @@ def update_mission_status(request, mission_id: int):
         .distinct()
     )
 
+    # 1) Cập nhật mission status trước
+    mission.status = new_status
+    mission.save(update_fields=["status"])
+
+    # 2) Xác định uav_status tương ứng
     uav_status = None
     if new_status == "draft":
         uav_status = "idle"
@@ -319,9 +329,235 @@ def update_mission_status(request, mission_id: int):
     if used_uav_ids and uav_status:
         UAV.objects.filter(id__in=used_uav_ids).update(status=uav_status)
 
+    # 3) Start Mission lần đầu: chỉ khi từ planned -> running
+    if old_status == "planned" and new_status == "running":
+        for uav_id in used_uav_ids:
+            first_wp = (
+                RouteWaypoint.objects
+                .filter(mission=mission, uav_id=uav_id)
+                .order_by("order")
+                .first()
+            )
+            if first_wp:
+                uav = UAV.objects.get(id=uav_id)
+                uav.current_position = first_wp.point
+                uav.current_waypoint_index = 0
+                uav.route_direction = 1
+                if not uav.battery_level:
+                    uav.battery_level = 100.0
+                uav.last_seen_at = timezone.now()
+                uav.save(update_fields=[
+                    "current_position",
+                    "current_waypoint_index",
+                    "route_direction",
+                    "battery_level",
+                    "last_seen_at",
+                ])
+
+    # 4) Resume Mission: paused -> running
+    # KHÔNG reset vị trí, KHÔNG reset waypoint index, KHÔNG reset direction
+    if old_status == "paused" and new_status == "running":
+        for uav_id in used_uav_ids:
+            uav = UAV.objects.get(id=uav_id)
+            uav.last_seen_at = timezone.now()
+            uav.save(update_fields=["last_seen_at"])
+
+    # 5) Finish Mission: reset execution state
+    if new_status == "finished":
+        for uav_id in used_uav_ids:
+            uav = UAV.objects.get(id=uav_id)
+            uav.current_waypoint_index = 0
+            uav.route_direction = 1
+            uav.current_position = None
+            uav.last_seen_at = timezone.now()
+            uav.save(update_fields=[
+                "current_waypoint_index",
+                "route_direction",
+                "current_position",
+                "last_seen_at",
+            ])
+
+    return Response({
+        "ok": True,
+        "mission_id": mission.id,
+        "old_status": old_status,
+        "status": mission.status,
+        "uav_status": uav_status,
+    })
+
+@api_view(["POST"])
+def restart_mission(request, mission_id: int):
+    """
+    Restart một mission đã finished:
+    - mission -> running
+    - UAV -> running
+    - reset execution state về đầu route
+    - battery reset về 100
+    """
+    mission = Mission.objects.get(id=mission_id)
+
+    if mission.status != "finished":
+        return Response(
+            {"detail": "Chỉ restart được mission đang ở trạng thái finished"},
+            status=400,
+        )
+
+    used_uav_ids = list(
+        ClusterAssignment.objects.filter(mission=mission)
+        .values_list("uav_id", flat=True)
+        .distinct()
+    )
+
+    mission.status = "running"
+    mission.save(update_fields=["status"])
+
+    if used_uav_ids:
+        UAV.objects.filter(id__in=used_uav_ids).update(status="running")
+
+    for uav_id in used_uav_ids:
+        first_wp = (
+            RouteWaypoint.objects
+            .filter(mission=mission, uav_id=uav_id)
+            .order_by("order")
+            .first()
+        )
+
+        if not first_wp:
+            continue
+
+        uav = UAV.objects.get(id=uav_id)
+        uav.current_position = first_wp.point
+        uav.current_waypoint_index = 0
+        uav.route_direction = 1
+        uav.battery_level = 100.0
+        uav.last_seen_at = timezone.now()
+        uav.save(update_fields=[
+            "current_position",
+            "current_waypoint_index",
+            "route_direction",
+            "battery_level",
+            "last_seen_at",
+        ])
+
     return Response({
         "ok": True,
         "mission_id": mission.id,
         "status": mission.status,
-        "uav_status": uav_status,
+        "uav_status": "running",
+    })
+
+@api_view(["POST"])
+def simulate_mission_tick(request, mission_id: int):
+    """
+    Giả lập UAV tiến thêm 1 bước trên route.
+    UAV sẽ đi tới cuối route rồi quay đầu tuần tra ngược lại.
+    Chỉ hoạt động khi mission đang ở trạng thái running.
+    """
+    mission = Mission.objects.get(id=mission_id)
+
+    if mission.status != "running":
+        return Response(
+            {"detail": "Mission phải ở trạng thái running để simulate tick"},
+            status=400,
+        )
+
+    used_uav_ids = list(
+        ClusterAssignment.objects.filter(mission=mission)
+        .values_list("uav_id", flat=True)
+        .distinct()
+    )
+
+    updated = []
+
+    for uav_id in used_uav_ids:
+        uav = UAV.objects.get(id=uav_id)
+
+        waypoints = list(
+            RouteWaypoint.objects
+            .filter(mission=mission, uav_id=uav_id)
+            .order_by("order")
+        )
+
+        if not waypoints:
+            continue
+
+        if len(waypoints) == 1:
+            uav.current_waypoint_index = 0
+            uav.current_position = waypoints[0].point
+            uav.last_seen_at = timezone.now()
+            uav.battery_level = max((uav.battery_level or 100.0) - 0.2, 0.0)
+            uav.save(update_fields=[
+                "current_waypoint_index",
+                "current_position",
+                "last_seen_at",
+                "battery_level",
+            ])
+
+            updated.append({
+                "uav_id": uav.id,
+                "name": uav.name,
+                "current_waypoint_index": uav.current_waypoint_index,
+                "route_direction": uav.route_direction,
+                "current_position": uav.current_position,
+                "battery_level": uav.battery_level,
+            })
+            continue
+
+        current_index = uav.current_waypoint_index or 0
+        direction = uav.route_direction or 1
+
+        next_index = current_index + direction
+
+        if next_index >= len(waypoints):
+            direction = -1
+            next_index = len(waypoints) - 2
+
+        elif next_index < 0:
+            direction = 1
+            next_index = 1
+
+        next_wp = waypoints[next_index]
+
+        uav.current_waypoint_index = next_index
+        uav.route_direction = direction
+        uav.current_position = next_wp.point
+        uav.last_seen_at = timezone.now()
+        uav.battery_level = max((uav.battery_level or 100.0) - 0.5, 0.0)
+
+        uav.save(update_fields=[
+            "current_waypoint_index",
+            "route_direction",
+            "current_position",
+            "last_seen_at",
+            "battery_level",
+        ])
+
+        updated.append({
+            "uav_id": uav.id,
+            "name": uav.name,
+            "current_waypoint_index": uav.current_waypoint_index,
+            "route_direction": uav.route_direction,
+            "current_position": uav.current_position,
+            "battery_level": uav.battery_level,
+        })
+
+    return Response({
+        "ok": True,
+        "mission_id": mission.id,
+        "updated": updated,
+    })
+
+@api_view(["POST"])
+def set_mission_auto_simulation(request, mission_id: int):
+    """
+    Bật/tắt auto simulation cho mission.
+    Lưu tạm vào payload đơn giản trong response workflow hiện tại bằng cách
+    trả về trạng thái cho frontend tự giữ.
+    Endpoint này chủ yếu để chuẩn hóa API điều khiển.
+    """
+    enabled = bool(request.data.get("enabled", False))
+    return Response({
+        "ok": True,
+        "mission_id": mission_id,
+        "auto_simulation": enabled,
     })

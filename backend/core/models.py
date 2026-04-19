@@ -43,6 +43,12 @@ class UAV(models.Model):
     color = models.CharField(max_length=20, default="#3388ff")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="idle")
 
+    current_position = models.JSONField(null=True, blank=True)
+    current_waypoint_index = models.IntegerField(default=0)
+    battery_level = models.FloatField(default=100.0)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+    route_direction = models.IntegerField(default=1)
+
     def __str__(self):
         return self.name
 

@@ -99,6 +99,15 @@ function labelText(label) {
   return "Bình thường";
 }
 
+function formatDateTime(value) {
+  if (!value) return "N/A";
+  try {
+    return new Date(value).toLocaleString();
+  } catch {
+    return String(value);
+  }
+}
+
 function makeUavIcon(color = "#3388ff", text = "U") {
   return L.divIcon({
     className: "",
@@ -137,6 +146,7 @@ export default function App() {
   const [restoring, setRestoring] = useState(true);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [focusedCellId, setFocusedCellId] = useState(null);
+  const [autoSimulation, setAutoSimulation] = useState(false);
 
   const center = useMemo(() => [21.0285, 105.8542], []);
 
@@ -200,6 +210,29 @@ export default function App() {
     return () => clearInterval(intervalId);
   }, [autoRefresh, missionId, restoring]);
 
+  useEffect(() => {
+    if (!autoSimulation) return;
+    if (!missionId) return;
+    if (state?.mission?.status !== "running") return;
+
+    const intervalId = setInterval(async () => {
+      try {
+        await post(`/missions/${missionId}/tick/`, {});
+        await refreshState(missionId);
+      } catch (err) {
+        console.error("Auto simulation tick failed:", err);
+      }
+    }, 3000);
+
+    return () => clearInterval(intervalId);
+  }, [autoSimulation, missionId, state?.mission?.status]);
+
+  useEffect(() => {
+    if (state?.mission?.status !== "running" && autoSimulation) {
+      setAutoSimulation(false);
+    }
+  }, [state?.mission?.status, autoSimulation]);
+
   async function handleCreateAreaFromPolygon() {
     if (!polygonGeo || polygonGeo.type !== "Polygon") {
       alert("Bạn chưa vẽ polygon. Hãy dùng tool Draw (góc trái bản đồ) để vẽ vùng rừng.");
@@ -259,6 +292,42 @@ export default function App() {
 
     await post(`/missions/${missionId}/status/`, { status: nextStatus });
     await refreshState();
+  }
+
+  async function handleRestartMission() {
+    if (!missionId) {
+      alert("Create mission first");
+      return;
+    }
+
+    await post(`/missions/${missionId}/restart/`, {});
+    await refreshState();
+  }
+
+  async function handleSimulateTick() {
+    if (!missionId) {
+      alert("Create mission first");
+      return;
+    }
+
+    await post(`/missions/${missionId}/tick/`, {});
+    await refreshState();
+  }
+
+  async function handleToggleAutoSimulation() {
+    if (!missionId) {
+      alert("Create mission first");
+      return;
+    }
+
+    if (state?.mission?.status !== "running" && !autoSimulation) {
+      alert("Mission phải ở trạng thái running mới bật được Auto Simulation");
+      return;
+    }
+
+    const next = !autoSimulation;
+    await post(`/missions/${missionId}/auto-simulation/`, { enabled: next });
+    setAutoSimulation(next);
   }
 
   async function handleResetSession() {
@@ -483,6 +552,11 @@ export default function App() {
         alertCount: smokeCount + fireCount,
         centroid,
         routeReady: routeSet.has(uav.id),
+        currentPosition: uav.current_position || null,
+        currentWaypointIndex: uav.current_waypoint_index ?? 0,
+        routeDirection: uav.route_direction ?? 1,
+        batteryLevel: uav.battery_level ?? 100,
+        lastSeenAt: uav.last_seen_at || null,
       });
     }
 
@@ -555,16 +629,66 @@ export default function App() {
 
         <div style={{ marginTop: 12 }}>
           <div style={{ fontWeight: 600 }}>Mission Control</div>
+
           <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={() => handleMissionStatusChange("running")}>
-              Start Mission
-            </button>
-            <button onClick={() => handleMissionStatusChange("paused")}>
-              Pause Mission
-            </button>
-            <button onClick={() => handleMissionStatusChange("finished")}>
-              Finish Mission
-            </button>
+            {state?.mission?.status === "planned" && (
+              <button onClick={() => handleMissionStatusChange("running")}>
+                Start Mission
+              </button>
+            )}
+
+            {state?.mission?.status === "running" && (
+              <button onClick={() => handleMissionStatusChange("paused")}>
+                Pause Mission
+              </button>
+            )}
+
+            {state?.mission?.status === "paused" && (
+              <button onClick={() => handleMissionStatusChange("running")}>
+                Resume Mission
+              </button>
+            )}
+
+            {(state?.mission?.status === "planned" ||
+              state?.mission?.status === "running" ||
+              state?.mission?.status === "paused") &&
+              missionId && (
+                <button onClick={() => handleMissionStatusChange("finished")}>
+                  Finish Mission
+                </button>
+              )}
+
+            {state?.mission?.status === "finished" && missionId && (
+              <button onClick={handleRestartMission}>
+                Restart Mission
+              </button>
+            )}
+
+            {state?.mission?.status === "running" && (
+              <button onClick={handleSimulateTick}>
+                Simulate Tick
+              </button>
+            )}
+
+            {state?.mission?.status === "running" && (
+              <button onClick={handleToggleAutoSimulation}>
+                {autoSimulation ? "Auto Sim: ON" : "Auto Sim: OFF"}
+              </button>
+            )}
+          </div>
+
+          <div style={{ marginTop: 6, fontSize: 12, color: "#666" }}>
+            {state?.mission?.status === "planned" &&
+              "Mission đã được lập kế hoạch, sẵn sàng bắt đầu từ waypoint đầu."}
+
+            {state?.mission?.status === "running" &&
+              "Mission đang chạy. UAV tiếp tục tuần tra theo route hiện tại."}
+
+            {state?.mission?.status === "paused" &&
+              "Mission đang tạm dừng. Resume sẽ tiếp tục từ vị trí hiện tại."}
+
+            {state?.mission?.status === "finished" &&
+              "Mission đã kết thúc một phiên tuần tra. Restart sẽ bắt đầu lại từ đầu route."}
           </div>
         </div>
 
@@ -577,6 +701,8 @@ export default function App() {
           <div>Focused cell: {focusedCellId ? `#${focusedCellId}` : "None"}</div>
           <div>Tip: Click a cell to mock AI label (0→1→2).</div>
           <div>Resume: tự động restore mission sau reload nếu đã có missionId.</div>
+          <div>UAV execution: {state?.mission?.status === "running" ? "Simulated" : "Idle"}</div>
+          <div>Auto simulation: {autoSimulation ? "ON" : "OFF"}</div>
         </div>
 
         <div style={{ marginTop: 12 }}>
@@ -680,6 +806,16 @@ export default function App() {
                     </span>
                   </div>
                   <div>Route: {item.routeReady ? "Ready" : "Not ready"}</div>
+                  <div>Waypoint Index: {item.currentWaypointIndex}</div>
+                  <div>Direction: {item.routeDirection === 1 ? "Forward" : "Backward"}</div>
+                  <div>Battery: {Number(item.batteryLevel || 0).toFixed(1)}%</div>
+                  <div>Last Seen: {formatDateTime(item.lastSeenAt)}</div>
+                  <div>
+                    Current Position:{" "}
+                    {item.currentPosition
+                      ? `[${Number(item.currentPosition.lat).toFixed(5)}, ${Number(item.currentPosition.lng).toFixed(5)}]`
+                      : "N/A"}
+                  </div>
                   <div>
                     Centroid:{" "}
                     {item.centroid
@@ -863,26 +999,41 @@ export default function App() {
             <Polyline key={uavId} positions={pts} />
           ))}
 
-          {uavMarkers.map((m) => (
-            <Marker
-              key={`uav-marker-${m.uav.id}`}
-              position={[m.center.lat, m.center.lng]}
-              icon={makeUavIcon(m.uav.color || "#3388ff", String(m.uav.id))}
-            >
-              <Tooltip direction="top" offset={[0, -10]} opacity={1}>
-                {m.uav.name}
-              </Tooltip>
-              <Popup>
-                <div style={{ minWidth: 180 }}>
-                  <div><b>{m.uav.name}</b></div>
-                  <div>UAV ID: {m.uav.id}</div>
-                  <div>Cells in cluster: {m.count}</div>
-                  <div>Centroid lat: {m.center.lat.toFixed(6)}</div>
-                  <div>Centroid lng: {m.center.lng.toFixed(6)}</div>
-                </div>
-              </Popup>
-            </Marker>
-          ))}
+          {uavStatusList.map((m) => {
+            const markerLat = m.currentPosition?.lat ?? m.centroid?.lat;
+            const markerLng = m.currentPosition?.lng ?? m.centroid?.lng;
+
+            if (markerLat == null || markerLng == null) return null;
+
+            return (
+              <Marker
+                key={`uav-marker-${m.uav.id}`}
+                position={[markerLat, markerLng]}
+                icon={makeUavIcon(m.uav.color || "#3388ff", String(m.uav.id))}
+              >
+                <Tooltip direction="top" offset={[0, -10]} opacity={1}>
+                  {m.uav.name}
+                </Tooltip>
+                <Popup>
+                  <div style={{ minWidth: 220 }}>
+                    <div><b>{m.uav.name}</b></div>
+                    <div>UAV ID: {m.uav.id}</div>
+                    <div>Status: {m.status}</div>
+                    <div>Assigned Cells: {m.assignedCells}</div>
+                    <div>Smoke in Region: {m.smokeCount}</div>
+                    <div>Fire in Region: {m.fireCount}</div>
+                    <div>Battery: {Number(m.batteryLevel || 0).toFixed(1)}%</div>
+                    <div>Waypoint Index: {m.currentWaypointIndex}</div>
+                    <div>Direction: {m.routeDirection === 1 ? "Forward" : "Backward"}</div>
+                    <div>Last Seen: {formatDateTime(m.lastSeenAt)}</div>
+                    <div>
+                      Position: [{Number(markerLat).toFixed(6)}, {Number(markerLng).toFixed(6)}]
+                    </div>
+                  </div>
+                </Popup>
+              </Marker>
+            );
+          })}
 
           {polygons.slice(0, 400).map((p) => (
             <CircleMarker key={`c-${p.id}`} center={p.center} radius={1} />
