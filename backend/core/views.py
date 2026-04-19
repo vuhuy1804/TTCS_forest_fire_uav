@@ -73,7 +73,7 @@ def create_mission(request, area_id: int):
     """
     area = ForestArea.objects.get(id=area_id)
     k = int(request.data.get("k", 3))
-    mission = Mission.objects.create(area=area, k=k)
+    mission = Mission.objects.create(area=area, k=k, status="draft")
     return Response(MissionSerializer(mission).data, status=status.HTTP_201_CREATED)
 
 
@@ -115,6 +115,18 @@ def run_kmeans(request, mission_id: int):
             uav=uavs[cluster_id],
         ))
     ClusterAssignment.objects.bulk_create(assigns)
+
+    mission.status = "planned"
+    mission.save(update_fields=["status"])
+
+    used_uav_ids = list(
+        ClusterAssignment.objects.filter(mission=mission)
+        .values_list("uav_id", flat=True)
+        .distinct()
+    )
+
+    if used_uav_ids:
+        UAV.objects.filter(id__in=used_uav_ids).update(status="assigned")
 
     return Response({
         "k": k,
@@ -263,4 +275,53 @@ def ingest_detection(request):
     return Response({
         "ok": True,
         "event_id": event.id,
+    })
+
+
+@api_view(["POST"])
+def update_mission_status(request, mission_id: int):
+    """
+    Cập nhật trạng thái mission:
+    draft | planned | running | paused | finished
+    Đồng thời cập nhật trạng thái UAV liên quan.
+    """
+    allowed = ["draft", "planned", "running", "paused", "finished"]
+    new_status = request.data.get("status")
+
+    if new_status not in allowed:
+        return Response(
+            {"detail": f"status phải thuộc {allowed}"},
+            status=400,
+        )
+
+    mission = Mission.objects.get(id=mission_id)
+    mission.status = new_status
+    mission.save(update_fields=["status"])
+
+    used_uav_ids = list(
+        ClusterAssignment.objects.filter(mission=mission)
+        .values_list("uav_id", flat=True)
+        .distinct()
+    )
+
+    uav_status = None
+    if new_status == "draft":
+        uav_status = "idle"
+    elif new_status == "planned":
+        uav_status = "assigned"
+    elif new_status == "running":
+        uav_status = "running"
+    elif new_status == "paused":
+        uav_status = "paused"
+    elif new_status == "finished":
+        uav_status = "idle"
+
+    if used_uav_ids and uav_status:
+        UAV.objects.filter(id__in=used_uav_ids).update(status=uav_status)
+
+    return Response({
+        "ok": True,
+        "mission_id": mission.id,
+        "status": mission.status,
+        "uav_status": uav_status,
     })

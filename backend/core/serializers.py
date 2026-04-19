@@ -14,12 +14,12 @@ class GridCellSerializer(serializers.ModelSerializer):
 class UAVSerializer(serializers.ModelSerializer):
     class Meta:
         model = UAV
-        fields = ["id", "name", "color"]
+        fields = ["id", "name", "color", "status"]
 
 class MissionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Mission
-        fields = ["id", "area", "k", "created_at"]
+        fields = ["id", "area", "k", "status", "created_at"]
 
 class ClusterAssignmentSerializer(serializers.ModelSerializer):
     cell = GridCellSerializer(read_only=True)

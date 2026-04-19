@@ -251,6 +251,16 @@ export default function App() {
     alert("Routes generated (zigzag)");
   }
 
+  async function handleMissionStatusChange(nextStatus) {
+    if (!missionId) {
+      alert("Create mission first");
+      return;
+    }
+
+    await post(`/missions/${missionId}/status/`, { status: nextStatus });
+    await refreshState();
+  }
+
   async function handleResetSession() {
     localStorage.removeItem(STORAGE_KEYS.areaId);
     localStorage.removeItem(STORAGE_KEYS.missionId);
@@ -466,7 +476,7 @@ export default function App() {
 
       result.push({
         uav,
-        status: "planned",
+        status: uav.status || "assigned",
         assignedCells: cells.length,
         smokeCount,
         fireCount,
@@ -543,9 +553,25 @@ export default function App() {
           </button>
         </div>
 
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontWeight: 600 }}>Mission Control</div>
+          <div style={{ marginTop: 6, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => handleMissionStatusChange("running")}>
+              Start Mission
+            </button>
+            <button onClick={() => handleMissionStatusChange("paused")}>
+              Pause Mission
+            </button>
+            <button onClick={() => handleMissionStatusChange("finished")}>
+              Finish Mission
+            </button>
+          </div>
+        </div>
+
         <div style={{ marginTop: 12, fontSize: 12, color: "#444" }}>
           <div>areaId: {String(areaId)}</div>
           <div>missionId: {String(missionId)}</div>
+          <div>Mission status: {state?.mission?.status || "N/A"}</div>
           <div>Polygon: {polygonGeo ? "OK ✅" : "Chưa có"}</div>
           <div>Auto refresh: {autoRefresh ? "ON (5s)" : "OFF"}</div>
           <div>Focused cell: {focusedCellId ? `#${focusedCellId}` : "None"}</div>
@@ -568,6 +594,7 @@ export default function App() {
             }}
           >
             <div><b>Mission ID:</b> {missionSummary.missionId ?? "N/A"}</div>
+            <div><b>Status:</b> {state?.mission?.status || "N/A"}</div>
             <div><b>UAVs:</b> {missionSummary.uavCount}</div>
             <div><b>Total Cells:</b> {missionSummary.totalCells}</div>
             <div><b>Normal:</b> {missionSummary.normalCount}</div>
@@ -620,7 +647,24 @@ export default function App() {
                   </div>
 
                   <div>UAV ID: {item.uav.id}</div>
-                  <div>Status: {item.status}</div>
+                  <div>
+                    Status:{" "}
+                    <span
+                      style={{
+                        fontWeight: 700,
+                        color:
+                          item.status === "running"
+                            ? "#389e0d"
+                            : item.status === "paused"
+                            ? "#d48806"
+                            : item.status === "offline"
+                            ? "#cf1322"
+                            : "#595959",
+                      }}
+                    >
+                      {item.status}
+                    </span>
+                  </div>
                   <div>Assigned Cells: {item.assignedCells}</div>
                   <div>Smoke in Region: {item.smokeCount}</div>
                   <div>Fire in Region: {item.fireCount}</div>

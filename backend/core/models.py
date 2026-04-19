@@ -31,16 +31,34 @@ class GridCell(models.Model):
 
 
 class UAV(models.Model):
+    STATUS_CHOICES = (
+        ("idle", "idle"),
+        ("assigned", "assigned"),
+        ("running", "running"),
+        ("paused", "paused"),
+        ("offline", "offline"),
+    )
+
     name = models.CharField(max_length=50)
     color = models.CharField(max_length=20, default="#3388ff")
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="idle")
 
     def __str__(self):
         return self.name
 
 
 class Mission(models.Model):
+    STATUS_CHOICES = (
+        ("draft", "draft"),
+        ("planned", "planned"),
+        ("running", "running"),
+        ("paused", "paused"),
+        ("finished", "finished"),
+    )
+
     area = models.ForeignKey(ForestArea, on_delete=models.CASCADE, related_name="missions")
     k = models.IntegerField(default=3)  # số UAV = số cụm K-means :contentReference[oaicite:4]{index=4}
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
     created_at = models.DateTimeField(auto_now_add=True)
 
 

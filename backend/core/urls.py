@@ -9,6 +9,7 @@ urlpatterns = [
     path("missions/<int:mission_id>/kmeans/", views.run_kmeans),
     path("missions/<int:mission_id>/routes/", views.generate_routes),
     path("missions/<int:mission_id>/state/", views.mission_state),
+    path("missions/<int:mission_id>/status/", views.update_mission_status),
 
     path("detections/", views.ingest_detection),
 ]
