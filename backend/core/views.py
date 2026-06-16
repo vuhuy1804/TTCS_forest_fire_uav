@@ -13,6 +13,7 @@ from .serializers import (
 )
 from .services import build_grid_cells, kmeans_assign, zigzag_route
 from .services import bbox_from_polygon, build_grid_cells_filtered
+from .experiment_services import compare_detection_strategies
 
 
 @api_view(["POST"])
@@ -278,6 +279,91 @@ def ingest_detection(request):
         "event_id": event.id,
     })
 
+
+@api_view(["POST"])
+def compare_experiment_strategies(request, mission_id: int):
+    """
+    So sánh 3 chiến lược phát hiện cháy:
+
+    1. Không K-means:
+       1 UAV quét toàn bộ grid theo zigzag.
+
+    2. Có K-means:
+       Nhiều UAV bay song song theo route của cụm được phân bổ.
+
+    3. K-means + hướng gió:
+       UAV bay theo K-means route, nhưng nếu phát hiện khói thì
+       suy luận nguồn cháy ngược chiều gió và ưu tiên kiểm tra candidate cells.
+
+    Payload:
+    {
+      "fire_cell_id": 2614,
+      "wind_direction_deg": 60,
+      "seconds_per_tick": 3,
+
+      "smoke_angle_deg": 35,      optional
+      "smoke_radius_m": 1000,     optional
+      "search_angle_deg": 40,     optional
+      "search_radius_m": 1200     optional
+    }
+    """
+    try:
+        mission = Mission.objects.get(id=mission_id)
+    except Mission.DoesNotExist:
+        return Response({"detail": "Mission không tồn tại."}, status=404)
+
+    try:
+        fire_cell_id = int(request.data["fire_cell_id"])
+    except (KeyError, TypeError, ValueError):
+        return Response({"detail": "fire_cell_id là bắt buộc và phải là số nguyên."}, status=400)
+
+    try:
+        wind_direction_deg = float(request.data.get("wind_direction_deg", 0))
+        seconds_per_tick = float(request.data.get("seconds_per_tick", 3))
+        smoke_angle_deg = float(request.data.get("smoke_angle_deg", 35))
+        search_angle_deg = float(request.data.get("search_angle_deg", 40))
+    except (TypeError, ValueError):
+        return Response(
+            {"detail": "wind_direction_deg, seconds_per_tick, smoke_angle_deg, search_angle_deg phải là số."},
+            status=400,
+        )
+
+    smoke_radius_raw = request.data.get("smoke_radius_m", None)
+    search_radius_raw = request.data.get("search_radius_m", None)
+
+    try:
+        smoke_radius_m = float(smoke_radius_raw) if smoke_radius_raw not in [None, ""] else None
+        search_radius_m = float(search_radius_raw) if search_radius_raw not in [None, ""] else None
+    except (TypeError, ValueError):
+        return Response(
+            {"detail": "smoke_radius_m và search_radius_m phải là số nếu có truyền lên."},
+            status=400,
+        )
+
+    if seconds_per_tick <= 0:
+        return Response({"detail": "seconds_per_tick phải lớn hơn 0."}, status=400)
+
+    if smoke_angle_deg <= 0 or smoke_angle_deg > 180:
+        return Response({"detail": "smoke_angle_deg phải nằm trong khoảng 0..180."}, status=400)
+
+    if search_angle_deg <= 0 or search_angle_deg > 180:
+        return Response({"detail": "search_angle_deg phải nằm trong khoảng 0..180."}, status=400)
+
+    try:
+        result = compare_detection_strategies(
+            mission=mission,
+            fire_cell_id=fire_cell_id,
+            wind_direction_deg=wind_direction_deg,
+            seconds_per_tick=seconds_per_tick,
+            smoke_angle_deg=smoke_angle_deg,
+            smoke_radius_m=smoke_radius_m,
+            search_angle_deg=search_angle_deg,
+            search_radius_m=search_radius_m,
+        )
+    except ValueError as e:
+        return Response({"detail": str(e)}, status=400)
+
+    return Response(result, content_type="application/json; charset=utf-8")
 
 @api_view(["POST"])
 def update_mission_status(request, mission_id: int):

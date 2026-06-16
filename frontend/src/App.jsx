@@ -566,7 +566,7 @@ export default function App() {
   return (
     <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", height: "100vh" }}>
       <div style={{ padding: 12, borderRight: "1px solid #ddd" }}>
-        <h3>Forest Fire UAV Dashboard</h3>
+        <h3>UAV Forest Fire Detection Dashboard</h3>
 
         {restoring && (
           <div style={{ marginBottom: 8, fontSize: 12, color: "#666" }}>
@@ -987,7 +987,8 @@ export default function App() {
                 eventHandlers={{
                   click: () => {
                     const cell = state.cells.find((x) => x.id === p.id);
-                    setFocusedCellId(cell.id);
+                    //click vao 1 cell thi focus den cell do
+                    //setFocusedCellId(cell.id);
                     toggleCell(cell);
                   },
                 }}

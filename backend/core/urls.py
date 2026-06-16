@@ -13,6 +13,7 @@ urlpatterns = [
     path("missions/<int:mission_id>/tick/", views.simulate_mission_tick),
     path("missions/<int:mission_id>/auto-simulation/", views.set_mission_auto_simulation),
     path("missions/<int:mission_id>/restart/", views.restart_mission),
+    path("missions/<int:mission_id>/experiments/compare/", views.compare_experiment_strategies),
 
     path("detections/", views.ingest_detection),
 ]
