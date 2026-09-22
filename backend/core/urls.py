@@ -14,6 +14,8 @@ urlpatterns = [
     path("missions/<int:mission_id>/auto-simulation/", views.set_mission_auto_simulation),
     path("missions/<int:mission_id>/restart/", views.restart_mission),
     path("missions/<int:mission_id>/experiments/compare/", views.compare_experiment_strategies),
+    path("missions/<int:mission_id>/benchmark/", views.run_simulation,
+),
 
     path("detections/", views.ingest_detection),
 ]

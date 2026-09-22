@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .models import GridCell, Mission, RouteWaypoint
 
+DEFAULT_UAV_SPEED = 10.0      # m/s
 
 def _center(cell: GridCell) -> Dict:
     return cell.center or {}
@@ -33,6 +34,13 @@ def _meters_between(a: GridCell, b: GridCell) -> float:
 
     return math.sqrt(dx * dx + dy * dy)
 
+def _travel_time_seconds(
+    from_cell: GridCell,
+    to_cell: GridCell,
+    uav_speed_mps: float,
+):
+    distance = _meters_between(from_cell, to_cell)
+    return distance / uav_speed_mps
 
 def _angle_from_a_to_b_deg(a: GridCell, b: GridCell) -> float:
     """
@@ -85,6 +93,43 @@ def _build_zigzag_cell_route(cells: List[GridCell]) -> List[GridCell]:
 
     return route
 
+
+def _build_baseline_routes(
+    routes_by_uav: Dict[int, Dict],
+    cells: List[GridCell],
+) -> Dict[int, Dict]:
+    """
+    Baseline nhiều UAV nhưng KHÔNG dùng K-means.
+
+    Toàn bộ grid được duyệt theo zigzag,
+    sau đó chia tuyến thành các đoạn liên tiếp cho các UAV.
+    """
+
+    full_route = _build_zigzag_cell_route(cells)
+
+    uav_items = list(routes_by_uav.values())
+
+    if not uav_items:
+        return {}
+
+    routes = {}
+
+    total = len(full_route)
+    n = len(uav_items)
+
+    chunk = math.ceil(total / n)
+
+    for i, item in enumerate(uav_items):
+        start = i * chunk
+        end = min((i + 1) * chunk, total)
+
+        routes[item["uav_id"]] = {
+            "uav_id": item["uav_id"],
+            "uav_name": item["uav_name"],
+            "route": full_route[start:end],
+        }
+
+    return routes
 
 def _center_key(center: Dict) -> Tuple[float, float]:
     """
@@ -241,22 +286,16 @@ def _result(
     strategy: str,
     label: str,
     detected: bool,
-    detected_at_tick: Optional[int],
-    seconds_per_tick: float,
+    detected_time_seconds: float,
     detected_by_uav: Optional[str],
     checked_cells: int,
     extra: Optional[Dict] = None,
 ) -> Dict:
-    detected_time_seconds = None
-
-    if detected_at_tick is not None:
-        detected_time_seconds = detected_at_tick * seconds_per_tick
 
     data = {
         "strategy": strategy,
         "label": label,
         "detected": detected,
-        "detected_at_tick": detected_at_tick,
         "detected_time_seconds": detected_time_seconds,
         "detected_by_uav": detected_by_uav,
         "checked_cells": checked_cells,
@@ -269,38 +308,100 @@ def _result(
 
 
 def simulate_no_kmeans(
-    cells: List[GridCell],
+    routes_by_uav: Dict[int, Dict],
     fire_cell_id: int,
-    seconds_per_tick: float,
+    uav_speed_mps: float,
 ) -> Dict:
     """
-    Chiến lược 1:
-    Không K-means, 1 UAV quét toàn bộ vùng theo zigzag.
+    Chiến lược 1
+
+    Không K-means.
+    N UAV chia đều tuyến zigzag và bay song song.
+
+    Thời gian phát hiện = quãng đường UAV đã bay / vận tốc UAV.
     """
-    route = _build_zigzag_cell_route(cells)
+
+    if not routes_by_uav:
+        return _result(
+            strategy="no_kmeans",
+            label="1) Không K-means",
+            detected=False,
+            detected_time_seconds=None,
+            detected_by_uav=None,
+            checked_cells=0,
+        )
+
     checked_cells = 0
 
-    for index, cell in enumerate(route):
-        checked_cells += 1
+    # lưu thời gian hiện tại của từng UAV
+    uav_times = {
+        uav_id: 0.0
+        for uav_id in routes_by_uav.keys()
+    }
 
-        if cell.id == fire_cell_id:
-            tick = index + 1
-            return _result(
-                strategy="no_kmeans",
-                label="1) Không K-means",
-                detected=True,
-                detected_at_tick=tick,
-                seconds_per_tick=seconds_per_tick,
-                detected_by_uav="UAV-Baseline",
-                checked_cells=checked_cells,
-            )
+    uav_distances = {
+        uav_id: 0.0
+        for uav_id in routes_by_uav.keys()
+    }
+
+    # lưu cell trước đó của từng UAV
+    previous_cells = {
+        uav_id: None
+        for uav_id in routes_by_uav.keys()
+    }
+
+    max_len = max(len(item["route"]) for item in routes_by_uav.values())
+
+    for step in range(max_len):
+
+        for uav_id in sorted(routes_by_uav.keys()):
+
+            item = routes_by_uav[uav_id]
+            route = item["route"]
+
+            if step >= len(route):
+                continue
+
+            current_cell = route[step]
+
+            # nếu không phải waypoint đầu tiên thì cộng thêm thời gian di chuyển
+            if previous_cells[uav_id] is not None:
+
+                distance = _meters_between(
+                    previous_cells[uav_id],
+                    current_cell,
+                )
+
+                uav_distances[uav_id] += distance
+
+                uav_times[uav_id] += distance / uav_speed_mps
+
+            previous_cells[uav_id] = current_cell
+
+            checked_cells += 1
+
+            if current_cell.id == fire_cell_id:
+
+                return _result(
+                    strategy="no_kmeans",
+                    label="1) Không K-means",
+                    detected=True,
+                    detected_time_seconds=uav_times[uav_id],
+                    detected_by_uav=item["uav_name"],
+                    checked_cells=checked_cells,
+                    extra={
+                        "travel_distance_m": round(
+                            uav_distances[uav_id],
+                            2,
+                        ),
+                    },                   
+                )
 
     return _result(
         strategy="no_kmeans",
         label="1) Không K-means",
         detected=False,
-        detected_at_tick=None,
-        seconds_per_tick=seconds_per_tick,
+        detected_time_seconds=None,
         detected_by_uav=None,
         checked_cells=checked_cells,
     )
@@ -309,55 +410,101 @@ def simulate_no_kmeans(
 def simulate_kmeans(
     routes_by_uav: Dict[int, Dict],
     fire_cell_id: int,
-    seconds_per_tick: float,
+    uav_speed_mps: float,
 ) -> Dict:
     """
-    Chiến lược 2:
-    Có K-means, nhiều UAV bay song song theo route của cụm mình.
+    Chiến lược 2
+
+    Có K-means.
+    Mỗi UAV bay theo route của cụm được phân công.
+
+    Thời gian phát hiện = quãng đường UAV đã bay / vận tốc UAV.
     """
+
     if not routes_by_uav:
         return _result(
             strategy="kmeans",
             label="2) Có K-means",
             detected=False,
-            detected_at_tick=None,
-            seconds_per_tick=seconds_per_tick,
+            detected_time_seconds=None,
             detected_by_uav=None,
             checked_cells=0,
-            extra={"detail": "Chưa có route K-means. Hãy Run K-means và Generate Routes trước."},
+            extra={
+                "detail": "Chưa có route K-means. Hãy Run K-means và Generate Routes trước."
+            },
         )
 
-    max_len = max(len(item["route"]) for item in routes_by_uav.values())
     checked_cells = 0
 
-    for tick_index in range(max_len):
+    # Thời gian đã bay của từng UAV
+    uav_times = {
+        uav_id: 0.0
+        for uav_id in routes_by_uav.keys()
+    }
+
+    uav_distances = {
+        uav_id: 0.0
+        for uav_id in routes_by_uav.keys()
+    }
+
+    # Cell trước đó của từng UAV
+    previous_cells = {
+        uav_id: None
+        for uav_id in routes_by_uav.keys()
+    }
+
+    max_len = max(len(item["route"]) for item in routes_by_uav.values())
+
+    for step in range(max_len):
+
         for uav_id in sorted(routes_by_uav.keys()):
+
             item = routes_by_uav[uav_id]
             route = item["route"]
 
-            if tick_index >= len(route):
+            if step >= len(route):
                 continue
 
-            checked_cells += 1
-            cell = route[tick_index]
+            current_cell = route[step]
 
-            if cell.id == fire_cell_id:
+            # waypoint đầu tiên không mất thời gian di chuyển
+            if previous_cells[uav_id] is not None:
+
+                distance = _meters_between(
+                    previous_cells[uav_id],
+                    current_cell,
+                )
+
+                uav_distances[uav_id] += distance
+
+                uav_times[uav_id] += distance / uav_speed_mps
+
+            previous_cells[uav_id] = current_cell
+
+            checked_cells += 1
+
+            if current_cell.id == fire_cell_id:
+
                 return _result(
                     strategy="kmeans",
                     label="2) Có K-means",
                     detected=True,
-                    detected_at_tick=tick_index + 1,
-                    seconds_per_tick=seconds_per_tick,
+                    detected_time_seconds=uav_times[uav_id],
                     detected_by_uav=item["uav_name"],
                     checked_cells=checked_cells,
+                    extra={
+                        "travel_distance_m": round(
+                            uav_distances[uav_id],
+                            2,
+                        ),
+                    },
                 )
 
     return _result(
         strategy="kmeans",
         label="2) Có K-means",
         detected=False,
-        detected_at_tick=None,
-        seconds_per_tick=seconds_per_tick,
+        detected_time_seconds=None,
         detected_by_uav=None,
         checked_cells=checked_cells,
     )
@@ -368,32 +515,33 @@ def simulate_kmeans_wind(
     routes_by_uav: Dict[int, Dict],
     fire_cell: GridCell,
     wind_direction_deg: float,
-    seconds_per_tick: float,
+    uav_speed_mps: float,
     smoke_angle_deg: float,
     smoke_radius_m: float,
     search_angle_deg: float,
     search_radius_m: float,
 ) -> Dict:
     """
-    Chiến lược 3:
-    K-means + truy vết nguồn cháy từ khói theo hướng gió.
+    Chiến lược 3
 
-    Ban đầu UAV bay theo route K-means.
-    Nếu gặp smoke cell:
-      - suy luận nguồn cháy nằm ngược chiều gió
-      - tạo danh sách candidate cells
-      - UAV ưu tiên kiểm tra candidates trước route cố định.
+    K-means + hướng gió.
+
+    UAV bay theo route K-means.
+    Khi gặp cell có khói sẽ ưu tiên kiểm tra các candidate
+    nằm ngược chiều gió.
     """
+
     if not routes_by_uav:
         return _result(
             strategy="kmeans_wind",
             label="3) K-means + hướng gió",
             detected=False,
-            detected_at_tick=None,
-            seconds_per_tick=seconds_per_tick,
+            detected_time_seconds=None,
             detected_by_uav=None,
             checked_cells=0,
-            extra={"detail": "Chưa có route K-means. Hãy Run K-means và Generate Routes trước."},
+            extra={
+                "detail": "Chưa có route K-means. Hãy Run K-means và Generate Routes trước."
+            },
         )
 
     smoke_cell_ids = _build_smoke_cell_ids(
@@ -414,33 +562,67 @@ def simulate_kmeans_wind(
         for uav_id in routes_by_uav.keys()
     }
 
+    # ==========================
+    # THÊM PHẦN TÍNH THỜI GIAN
+    # ==========================
+
+    uav_times = {
+        uav_id: 0.0
+        for uav_id in routes_by_uav.keys()
+    }
+
+    uav_distances = {
+        uav_id: 0.0
+        for uav_id in routes_by_uav.keys()
+    }
+
+    previous_cells = {
+        uav_id: None
+        for uav_id in routes_by_uav.keys()
+    }
+
+    # ==========================
+
     checked_cells = 0
+
     first_smoke_cell_id = None
     first_smoke_by_uav = None
+
     wind_reroute_events = []
 
-    max_ticks = max(len(item["route"]) for item in routes_by_uav.values()) + len(cells) + 10
+    max_steps = (
+        max(len(item["route"]) for item in routes_by_uav.values())
+        + len(cells)
+        + 10
+    )
 
-    for tick_index in range(max_ticks):
+    for step in range(max_steps):
+
         any_uav_moved = False
 
         for uav_id in sorted(routes_by_uav.keys()):
+
             item = routes_by_uav[uav_id]
+
             route = item["route"]
 
             current_cell = None
             movement_mode = "kmeans_route"
 
             if priority_route_by_uav[uav_id]:
+
                 current_cell = priority_route_by_uav[uav_id].pop(0)
                 movement_mode = "wind_candidate"
+
             else:
+
                 base_index = base_index_by_uav[uav_id]
 
                 if base_index < len(route):
+
                     current_cell = route[base_index]
+
                     base_index_by_uav[uav_id] = base_index + 1
-                    movement_mode = "kmeans_route"
 
             if current_cell is None:
                 continue
@@ -448,13 +630,32 @@ def simulate_kmeans_wind(
             any_uav_moved = True
             checked_cells += 1
 
+            # ==================================
+            # CỘNG THỜI GIAN DI CHUYỂN
+            # ==================================
+
+            if previous_cells[uav_id] is not None:
+
+                distance = _meters_between(
+                    previous_cells[uav_id],
+                    current_cell,
+                )
+
+                uav_distances[uav_id] += distance
+
+                uav_times[uav_id] += distance / uav_speed_mps
+
+            previous_cells[uav_id] = current_cell
+
+            # ==================================
+
             if current_cell.id == fire_cell.id:
+
                 return _result(
                     strategy="kmeans_wind",
                     label="3) K-means + hướng gió",
                     detected=True,
-                    detected_at_tick=tick_index + 1,
-                    seconds_per_tick=seconds_per_tick,
+                    detected_time_seconds=uav_times[uav_id],
                     detected_by_uav=item["uav_name"],
                     checked_cells=checked_cells,
                     extra={
@@ -464,31 +665,38 @@ def simulate_kmeans_wind(
                         "movement_mode_when_detected": movement_mode,
                         "smoke_cell_count": len(smoke_cell_ids),
                         "wind_reroute_events": wind_reroute_events,
+                        "travel_distance_m": round(
+                            uav_distances[uav_id],
+                            2,
+                        ),
                     },
                 )
 
-            if current_cell.id in smoke_cell_ids and not priority_route_by_uav[uav_id]:
+            if (
+                current_cell.id in smoke_cell_ids
+                and not priority_route_by_uav[uav_id]
+            ):
+
                 if first_smoke_cell_id is None:
                     first_smoke_cell_id = current_cell.id
                     first_smoke_by_uav = item["uav_name"]
 
-                uav_cluster_cells = item["route"]
-
                 candidates = _infer_fire_candidates_from_smoke(
                     smoke_cell=current_cell,
-                    cells=uav_cluster_cells,
+                    cells=item["route"],
                     wind_direction_deg=wind_direction_deg,
                     search_angle_deg=search_angle_deg,
                     search_radius_m=search_radius_m,
                 )
 
                 wind_reroute_events.append({
-                    "tick": tick_index + 1,
                     "uav_id": uav_id,
                     "uav_name": item["uav_name"],
                     "smoke_cell_id": current_cell.id,
                     "candidate_count": len(candidates),
-                    "candidate_cell_ids": [c.id for c in candidates[:20]],
+                    "candidate_cell_ids": [
+                        c.id for c in candidates[:20]
+                    ],
                 })
 
                 priority_route_by_uav[uav_id] = candidates
@@ -500,8 +708,7 @@ def simulate_kmeans_wind(
         strategy="kmeans_wind",
         label="3) K-means + hướng gió",
         detected=False,
-        detected_at_tick=None,
-        seconds_per_tick=seconds_per_tick,
+        detected_time_seconds=None,
         detected_by_uav=None,
         checked_cells=checked_cells,
         extra={
@@ -518,7 +725,7 @@ def compare_detection_strategies(
     mission: Mission,
     fire_cell_id: int,
     wind_direction_deg: float,
-    seconds_per_tick: float = 3.0,
+    uav_speed_mps: float = 10.0,
     smoke_angle_deg: float = 35.0,
     smoke_radius_m: Optional[float] = None,
     search_angle_deg: float = 40.0,
@@ -527,11 +734,16 @@ def compare_detection_strategies(
     """
     Hàm chính gọi từ API.
 
-    Chạy cùng một fire_cell + wind_direction trên 3 chiến lược:
+    So sánh 3 chiến lược:
+
     1. Không K-means
     2. Có K-means
     3. K-means + hướng gió
+
+    Thời gian được tính theo:
+        Time = Distance / UAV Speed
     """
+
     cells = list(
         GridCell.objects
         .filter(area=mission.area)
@@ -549,54 +761,96 @@ def compare_detection_strategies(
     fire_cell = cell_by_id.get(fire_cell_id)
 
     if not fire_cell:
-        raise ValueError("fire_cell_id không thuộc vùng rừng của mission hiện tại.")
+        raise ValueError(
+            "fire_cell_id không thuộc vùng rừng của mission hiện tại."
+        )
 
     if smoke_radius_m is None:
-        smoke_radius_m = _auto_radius_m(cells, ratio=0.35)
+        smoke_radius_m = _auto_radius_m(
+            cells,
+            ratio=0.35,
+        )
 
     if search_radius_m is None:
-        search_radius_m = _auto_radius_m(cells, ratio=0.45)
+        search_radius_m = _auto_radius_m(
+            cells,
+            ratio=0.45,
+        )
 
-    routes_by_uav = _build_routes_by_uav(mission, cells)
+    # Route K-means
+    routes_by_uav = _build_routes_by_uav(
+        mission,
+        cells,
+    )
+
+    # Route baseline
+    baseline_routes = _build_baseline_routes(
+        routes_by_uav,
+        cells,
+    )
 
     results = [
+
         simulate_no_kmeans(
-            cells=cells,
+            routes_by_uav=baseline_routes,
             fire_cell_id=fire_cell_id,
-            seconds_per_tick=seconds_per_tick,
+            uav_speed_mps=uav_speed_mps,
         ),
+
         simulate_kmeans(
             routes_by_uav=routes_by_uav,
             fire_cell_id=fire_cell_id,
-            seconds_per_tick=seconds_per_tick,
+            uav_speed_mps=uav_speed_mps,
         ),
+
         simulate_kmeans_wind(
             cells=cells,
             routes_by_uav=routes_by_uav,
             fire_cell=fire_cell,
             wind_direction_deg=wind_direction_deg,
-            seconds_per_tick=seconds_per_tick,
+            uav_speed_mps=uav_speed_mps,
             smoke_angle_deg=smoke_angle_deg,
             smoke_radius_m=smoke_radius_m,
             search_angle_deg=search_angle_deg,
             search_radius_m=search_radius_m,
         ),
+
     ]
 
     return {
+
         "ok": True,
+
         "mission_id": mission.id,
+
         "area_id": mission.area_id,
+
         "fire_cell_id": fire_cell_id,
+
         "fire_cell_center": fire_cell.center,
+
         "wind_direction_deg": wind_direction_deg,
-        "seconds_per_tick": seconds_per_tick,
+
+        "uav_speed_mps": uav_speed_mps,
+
         "params": {
+
             "smoke_angle_deg": smoke_angle_deg,
+
             "smoke_radius_m": smoke_radius_m,
+
             "search_angle_deg": search_angle_deg,
+
             "search_radius_m": search_radius_m,
-            "wind_direction_note": "0=Đông, 90=Bắc, 180=Tây, 270=Nam. Đây là hướng khói bay tới.",
+
+            "wind_direction_note":
+                "0=Đông, 90=Bắc, 180=Tây, 270=Nam. Đây là hướng khói bay tới.",
+
+            "time_formula":
+                "Time = Distance / UAV Speed",
+
         },
+
         "results": results,
+
     }

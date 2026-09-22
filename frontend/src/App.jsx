@@ -90,7 +90,7 @@ function cellFillColor(label, uavColor) {
 function cellFillOpacity(label) {
   if (label === 2) return 0.7;
   if (label === 1) return 0.5;
-  return 0.12;
+  return 0.35;
 }
 
 function labelText(label) {
@@ -112,26 +112,85 @@ function makeUavIcon(color = "#3388ff", text = "U") {
   return L.divIcon({
     className: "",
     html: `
-      <div style="
-        width: 28px;
-        height: 28px;
-        border-radius: 50%;
-        background: ${color};
-        border: 2px solid white;
-        box-shadow: 0 0 0 1px #333;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 11px;
-        font-weight: 700;
-        color: white;
-      ">
-        ${text}
+      <div
+        style="
+          position: relative;
+          width: 40px;
+          height: 40px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        "
+      >
+        <svg
+          width="40"
+          height="40"
+          viewBox="0 0 100 100"
+        >
+          <!-- arms -->
+          <line x1="20" y1="20" x2="80" y2="80"
+                stroke="${color}" stroke-width="6"/>
+
+          <line x1="80" y1="20" x2="20" y2="80"
+                stroke="${color}" stroke-width="6"/>
+
+          <!-- propellers -->
+          <circle cx="20" cy="20" r="10"
+                  fill="white"
+                  stroke="${color}"
+                  stroke-width="4"/>
+
+          <circle cx="80" cy="20" r="10"
+                  fill="white"
+                  stroke="${color}"
+                  stroke-width="4"/>
+
+          <circle cx="20" cy="80" r="10"
+                  fill="white"
+                  stroke="${color}"
+                  stroke-width="4"/>
+
+          <circle cx="80" cy="80" r="10"
+                  fill="white"
+                  stroke="${color}"
+                  stroke-width="4"/>
+
+          <!-- body -->
+          <circle cx="50" cy="50" r="22"
+                  fill="${color}"
+                  stroke="white"
+                  stroke-width="3"/>
+        </svg>
+
+        <div
+          style="
+            position:absolute;
+            left:50%;
+            top:50%;
+            transform:translate(-50%,-50%);
+
+            z-index:1000;
+
+            color:white;
+            font-weight:900;
+            font-size:14px;
+            line-height:14px;
+
+            text-shadow:
+              0 0 2px black,
+              0 0 4px black,
+              0 0 6px black;
+
+            pointer-events:none;
+          "
+        >
+          ${text}
+        </div>
       </div>
     `,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-    popupAnchor: [0, -14],
+    iconSize: [48, 48],
+    iconAnchor: [24, 24],
+    popupAnchor: [0, -24],
   });
 }
 
@@ -538,9 +597,9 @@ export default function App() {
 
       const centroid = cells.length
         ? {
-            lat: latSum / cells.length,
-            lng: lngSum / cells.length,
-          }
+          lat: latSum / cells.length,
+          lng: lngSum / cells.length,
+        }
         : null;
 
       result.push({
@@ -782,10 +841,10 @@ export default function App() {
                           item.status === "running"
                             ? "#389e0d"
                             : item.status === "paused"
-                            ? "#d48806"
-                            : item.status === "offline"
-                            ? "#cf1322"
-                            : "#595959",
+                              ? "#d48806"
+                              : item.status === "offline"
+                                ? "#cf1322"
+                                : "#595959",
                       }}
                     >
                       {item.status}
@@ -959,7 +1018,7 @@ export default function App() {
       <div>
         <MapContainer center={center} zoom={12} style={{ height: "100%", width: "100%" }}>
           <TileLayer
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            url="https://{s}.tile.openstreetmap.de/{z}/{x}/{y}.png"
             attribution="&copy; OpenStreetMap contributors"
           />
 
