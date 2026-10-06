@@ -21,6 +21,8 @@ export default function SimulationPage() {
 
     const [searchRadius, setSearchRadius] = useState("");
 
+    const [smokeThreshold, setSmokeThreshold] = useState(0.30);
+
     const [loading, setLoading] = useState(false);
 
     const [result, setResult] = useState(null);
@@ -57,6 +59,8 @@ export default function SimulationPage() {
 
                     search_radius_m:
                         searchRadius === "" ? null : Number(searchRadius),
+
+                    smoke_threshold: Number(smokeThreshold),
 
                 }
 
@@ -227,6 +231,23 @@ export default function SimulationPage() {
                                 value={searchRadius}
                                 onChange={(e) =>
                                     setSearchRadius(e.target.value)
+                                }
+                            />
+
+                        </td>
+
+                    </tr>
+
+                    <tr>
+
+                        <td>Smoke Threshold</td>
+
+                        <td>
+
+                            <input
+                                value={smokeThreshold}
+                                onChange={(e) =>
+                                    setSmokeThreshold(e.target.value)
                                 }
                             />
 

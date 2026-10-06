@@ -343,11 +343,15 @@ def compare_experiment_strategies(request, mission_id: int):
             request.data.get("search_angle_deg", 40)
         )
 
+        smoke_threshold = float(
+            request.data.get("smoke_threshold", 0.30)
+        )
+
     except (TypeError, ValueError):
         return Response(
             {
                 "detail":
-                "wind_direction_deg, uav_speed, smoke_angle_deg, search_angle_deg phải là số."
+                "wind_direction_deg, uav_speed, smoke_angle_deg, search_angle_deg, smoke_threshold phải là số."
             },
             status=400,
         )
@@ -421,6 +425,7 @@ def compare_experiment_strategies(request, mission_id: int):
 
             search_angle_deg=search_angle_deg,
             search_radius_m=search_radius_m,
+            smoke_threshold=smoke_threshold,
         )
 
     except ValueError as e:
@@ -491,6 +496,12 @@ def run_simulation(request, mission_id):
 
     smoke_radius = request.data.get("smoke_radius_m")
     search_radius = request.data.get("search_radius_m")
+    smoke_threshold = float(
+        request.data.get(
+            "smoke_threshold",
+            0.30
+        )
+    )
 
     if smoke_radius not in [None, ""]:
         smoke_radius = float(smoke_radius)
@@ -521,6 +532,8 @@ def run_simulation(request, mission_id):
         search_angle_deg=search_angle_deg,
 
         search_radius_m=search_radius,
+
+        smoke_threshold=smoke_threshold,
 
     )
 
