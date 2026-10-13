@@ -11,7 +11,7 @@ def run_simulation(
     smoke_radius_m=None,
     search_angle_deg: float = 40,
     search_radius_m=None,
-    smoke_threshold: float = 0.30,
+    smoke_threshold: float = 0.50,
 ):
     """
     Hàm benchmark đơn giản.

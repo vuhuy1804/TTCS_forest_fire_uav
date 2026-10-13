@@ -5,11 +5,11 @@ const API = "http://127.0.0.1:8000/api";
 
 export default function SimulationPage() {
 
-    const [missionId, setMissionId] = useState(1);
+    const [missionId, setMissionId] = useState(13);
 
     const [fireCellId, setFireCellId] = useState("");
 
-    const [windDirection, setWindDirection] = useState(0);
+    const [windDirection, setWindDirection] = useState(225);
 
     const [uavSpeed, setUavSpeed] = useState(10);
 
@@ -17,11 +17,11 @@ export default function SimulationPage() {
 
     const [smokeRadius, setSmokeRadius] = useState("");
 
-    const [searchAngle, setSearchAngle] = useState(40);
+    const [searchAngle, setSearchAngle] = useState(50);
 
     const [searchRadius, setSearchRadius] = useState("");
 
-    const [smokeThreshold, setSmokeThreshold] = useState(0.30);
+    const [smokeThreshold, setSmokeThreshold] = useState(0.50);
 
     const [loading, setLoading] = useState(false);
 

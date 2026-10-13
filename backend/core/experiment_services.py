@@ -1008,6 +1008,7 @@ def _select_swarm_next_cell(
     pbest: Optional[Dict],
     gbest: Optional[Dict],
     concentration_by_cell: Dict[int, float],
+    visited_history: List[int],  # Thêm lịch sử ô đã đi qua để chống lặp
 ) -> Optional[GridCell]:
     """
     Chọn cell tiếp theo cho UAV trong swarm.
@@ -1030,14 +1031,25 @@ def _select_swarm_next_cell(
     if not neighbors:
         return None
 
+    gbest_conc = gbest["concentration"] if gbest else 0.0
+
+    # 1. TRỌNG SỐ QUÁN TÍNH ĐỘNG (DYNAMIC WEIGHTS)
+    # Khi sát gốc cháy (gbest_conc cao): giảm đà xông xáo (gain), tăng lực hút Gbest để chốt điểm
+    if gbest_conc >= 0.70:
+        w_conc = 0.50
+        w_pbest = 0.15
+        w_gbest = 0.30
+        w_gain = 0.05
+    else:
+        w_conc = 0.40
+        w_pbest = 0.15
+        w_gbest = 0.15
+        w_gain = 0.30
+
     scored_candidates = []
 
     for cell in neighbors:
-
-        concentration = concentration_by_cell.get(
-            cell.id,
-            0.0,
-        )
+        concentration = concentration_by_cell.get(cell.id, 0.0)
 
         # -------------------------------------------------
         # Thành phần concentration
@@ -1052,16 +1064,8 @@ def _select_swarm_next_cell(
         pbest_score = 0.0
 
         if pbest is not None:
-
-            distance_to_pbest = _meters_between(
-                cell,
-                pbest["cell"],
-            )
-
-            # Càng gần Pbest càng tốt.
-            pbest_score = 1.0 / (
-                1.0 + distance_to_pbest
-            )
+            dist_pbest = _meters_between(cell, pbest["cell"])
+            pbest_score = 1.0 / (1.0 + dist_pbest)
 
         # -------------------------------------------------
         # Thành phần Gbest
@@ -1070,16 +1074,8 @@ def _select_swarm_next_cell(
         gbest_score = 0.0
 
         if gbest is not None:
-
-            distance_to_gbest = _meters_between(
-                cell,
-                gbest["cell"],
-            )
-
-            # Càng gần Gbest càng tốt.
-            gbest_score = 1.0 / (
-                1.0 + distance_to_gbest
-            )
+            dist_gbest = _meters_between(cell, gbest["cell"])
+            gbest_score = 1.0 / (1.0 + dist_gbest)
 
         # -------------------------------------------------
         # Xu hướng tăng concentration
@@ -1088,6 +1084,9 @@ def _select_swarm_next_cell(
         concentration_gain = (
             concentration - current_concentration
         )
+
+        # Tích hợp thêm trọng số rủi ro địa hình GIS (c.risk)
+        risk_factor = float(getattr(cell, "risk", 1.0) or 1.0) / 5.0
 
         # -------------------------------------------------
         # Fitness tổng hợp
@@ -1100,14 +1099,17 @@ def _select_swarm_next_cell(
         #
 
         score = (
-            0.60 * concentration_score
-            + 0.15 * pbest_score
-            + 0.15 * gbest_score
-            + 0.10 * max(
-                concentration_gain,
-                0.0,
-            )
+            w_conc * concentration
+            + w_pbest * pbest_score
+            + w_gbest * gbest_score
+            + w_gain * max(concentration_gain, 0.0)
+            + 0.05 * risk_factor
         )
+
+        # 2. XỬ LÝ CHỐNG LẶP / BẪY KẸT (STAGNATION HANDLING)
+        # Nếu ô này vừa đi qua trong 2 bước gần nhất, phạt nhẹ điểm score
+        if cell.id in visited_history[-2:]:
+            score *= 0.80
 
         scored_candidates.append(
             (
@@ -1299,6 +1301,10 @@ def simulate_kmeans_swarm(
 
     max_swarm_iterations = 100
 
+    # Bổ sung theo dõi lịch sử ô đã đi qua và các sự kiện Broadcast Gbest
+    uav_history = {uav_id: [] for uav_id in routes_by_uav.keys()}
+    broadcast_events = []
+
     # =========================================================
     # MAIN SIMULATION
     # =========================================================
@@ -1364,16 +1370,14 @@ def simulate_kmeans_swarm(
 
             else:
 
-                current_concentration = (
-                    concentration_by_cell.get(
-                        current_cell.id,
-                        0.0,
-                    )
+                current_concentration = concentration_by_cell.get(
+                    current_cell.id,
+                    0.0,
                 )
 
                 neighbors = _get_swarm_neighbors(
                     current_cell=current_cell,
-                    allowed_cells=route,
+                    allowed_cells=route, # Vẫn giữ UAV trong cụm K-means được giao
                 )
 
                 if not neighbors:
@@ -1399,27 +1403,37 @@ def simulate_kmeans_swarm(
                 # ĐÁNH GIÁ CONCENTRATION CỦA NEIGHBORS
                 # =============================================
 
+                # Chọn ô tiếp theo có tích hợp trọng số động + lịch sử chống lặp
+
                 next_cell = _select_swarm_next_cell(
                     current_cell=current_cell,
-                    current_concentration=(
-                        current_concentration
-                    ),
+                    current_concentration=current_concentration,
                     neighbors=neighbors,
                     pbest=pbest,
                     gbest=gbest,
-                    concentration_by_cell=(
-                        concentration_by_cell
-                    ),
+                    concentration_by_cell=concentration_by_cell,
+                    visited_history=uav_history[uav_id],
                 )
 
                 if next_cell is None:
                     continue
 
-                current_cell = next_cell
+                # Ghi nhận sự kiện khi UAV tìm ra điểm khói vượt qua Gbest cũ của toàn bầy
+                old_gbest_conc = gbest["concentration"] if gbest else 0.0
+                next_conc = concentration_by_cell.get(next_cell.id, 0.0)
+                if next_conc > old_gbest_conc:
+                    broadcast_events.append({
+                        "step": step,
+                        "uav_id": uav_id,
+                        "uav_name": item["uav_name"],
+                        "new_gbest_cell_id": next_cell.id,
+                        "concentration": round(next_conc, 6),
+                    })
 
-                swarm_iterations_by_uav[
-                    uav_id
-                ] += 1
+                current_cell = next_cell
+                uav_history[uav_id].append(current_cell.id)  # Lưu lại ô vừa đi qua
+
+                swarm_iterations_by_uav[uav_id] += 1
 
             # =================================================
             # UAV DI CHUYỂN
@@ -1472,61 +1486,17 @@ def simulate_kmeans_swarm(
                     detected_by_uav=item["uav_name"],
                     checked_cells=checked_cells,
                     extra={
-                        "smoke_detected": (
-                            first_smoke_cell_id
-                            is not None
-                        ),
-
-                        "first_smoke_cell_id": (
-                            first_smoke_cell_id
-                        ),
-
-                        "first_smoke_by_uav": (
-                            first_smoke_by_uav
-                        ),
-
-                        "first_smoke_concentration": (
-                            first_smoke_concentration
-                        ),
-
-                        "smoke_threshold": (
-                            smoke_threshold
-                        ),
-
+                        "smoke_detected": first_smoke_cell_id is not None,
+                        "first_smoke_cell_id": first_smoke_cell_id,
+                        "first_smoke_by_uav": first_smoke_by_uav,
+                        "first_smoke_concentration": first_smoke_concentration,
+                        "smoke_threshold": smoke_threshold,
                         "swarm_active": True,
-
-                        "swarm_iterations": (
-                            swarm_iterations_by_uav[
-                                uav_id
-                            ]
-                        ),
-
-                        "pbest_concentration": (
-                            pbest_by_uav.get(
-                                uav_id,
-                                {},
-                            ).get(
-                                "concentration",
-                                None,
-                            )
-                        ),
-
-                        "gbest_concentration": (
-                            (
-                                _get_swarm_gbest(
-                                    pbest_by_uav
-                                )
-                                or {}
-                            ).get(
-                                "concentration",
-                                None,
-                            )
-                        ),
-
-                        "travel_distance_m": round(
-                            uav_distances[uav_id],
-                            2,
-                        ),
+                        "swarm_iterations": swarm_iterations_by_uav[uav_id],
+                        "broadcast_events": broadcast_events,  #
+                        "pbest_concentration": pbest_by_uav.get(uav_id, {}).get("concentration", None),
+                        "gbest_concentration": (_get_swarm_gbest(pbest_by_uav) or {}).get("concentration", None),
+                        "travel_distance_m": round(uav_distances[uav_id], 2),
                     },
                 )
 
@@ -1665,6 +1635,8 @@ def simulate_kmeans_swarm(
             "swarm_iterations": sum(
                 swarm_iterations_by_uav.values()
             ),
+
+            "broadcast_events": broadcast_events, #
         },
     )
 
@@ -1678,7 +1650,7 @@ def compare_detection_strategies(
     smoke_radius_m: Optional[float] = None,
     search_angle_deg: float = 40.0,
     search_radius_m: Optional[float] = None,
-    smoke_threshold: float = 0.30,
+    smoke_threshold: float = 0.50,
 ) -> Dict:
     """
     Hàm chính gọi từ API.
