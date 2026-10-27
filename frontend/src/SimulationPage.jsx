@@ -17,7 +17,7 @@ export default function SimulationPage() {
 
     const [smokeRadius, setSmokeRadius] = useState("");
 
-    const [searchAngle, setSearchAngle] = useState(50);
+    const [searchAngle, setSearchAngle] = useState(30);
 
     const [searchRadius, setSearchRadius] = useState("");
 

@@ -213,22 +213,14 @@ def _calculate_smoke_concentration(
     source_cell: GridCell,
     target_cell: GridCell,
     smoke_radius_m: float,
+    wind_direction_deg: Optional[float] = None,
+    smoke_angle_deg: float = 35.0,
 ) -> float:
     """
-    Tính nồng độ khói mô phỏng tại target_cell
-    do nguồn cháy tại source_cell tạo ra.
-
-    Đây là mô hình suy giảm nồng độ theo khoảng cách,
-    dùng cho mô phỏng và so sánh thuật toán.
-
-    Nồng độ lớn nhất tại nguồn cháy và giảm dần
-    khi khoảng cách tới nguồn tăng.
+    Tính nồng độ khói mô phỏng tại target_cell do nguồn cháy tại source_cell tạo ra.
+    Khói lan theo hình quạt dạt xuôi theo hướng gió (wind_direction_deg).
     """
-
-    distance_m = _meters_between(
-        source_cell,
-        target_cell,
-    )
+    distance_m = _meters_between(source_cell, target_cell)
 
     if distance_m > smoke_radius_m:
         return 0.0
@@ -236,9 +228,17 @@ def _calculate_smoke_concentration(
     if distance_m <= 0:
         return 1.0
 
-    concentration = 1.0 - (
-        distance_m / smoke_radius_m
-    )
+    # Nếu có thông số hướng gió, kiểm tra xem target_cell có nằm trong vệt khói xuôi chiều gió không
+    if wind_direction_deg is not None:
+        angle_to_target = _angle_from_a_to_b_deg(source_cell, target_cell)
+        angle_diff = _angle_diff_deg(angle_to_target, wind_direction_deg)
+
+        # Nếu ô nằm ngoài góc quạt vệt khói do gió thổi -> Nồng độ khói bằng 0
+        if angle_diff > smoke_angle_deg:
+            return 0.0
+
+    # Nồng độ khói suy giảm theo khoảng cách
+    concentration = 1.0 - (distance_m / smoke_radius_m)
 
     return max(0.0, concentration)
 
@@ -325,7 +325,7 @@ def _infer_fire_candidates_from_smoke(
         )
     )
 
-    return candidates
+    return candidates[:5]
 
 
 def _result(
@@ -847,10 +847,11 @@ def simulate_kmeans_wind(
                 ],
             })
 
-            # Chỉ tạo route ưu tiên nếu có candidate
-            if candidates:
+            # CHỈ GÁN LỘ TRÌNH MỚI NẾU UAV ĐANG TRỐNG LỘ TRÌNH CANDIDATE
+            # (Tránh việc cứ đến ô mới có khói lại ghi đè danh sách làm UAV xoay vòng vô tận)
+            if candidates and not priority_route_by_uav[uav_id]:
 
-                priority_route_by_uav[uav_id] = candidates
+                priority_route_by_uav[uav_id] = candidates[:5]  # Chỉ lấy Top 5 ô nghi vấn nhất
 
     # =========================================================
     # KHÔNG PHÁT HIỆN FIRE
@@ -1648,7 +1649,7 @@ def compare_detection_strategies(
     uav_speed_mps: float = 10.0,
     smoke_angle_deg: float = 35.0,
     smoke_radius_m: Optional[float] = None,
-    search_angle_deg: float = 40.0,
+    search_angle_deg: float = 30.0,
     search_radius_m: Optional[float] = None,
     smoke_threshold: float = 0.50,
 ) -> Dict:

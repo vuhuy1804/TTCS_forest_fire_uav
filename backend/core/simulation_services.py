@@ -9,7 +9,7 @@ def run_simulation(
     uav_speed: float,
     smoke_angle_deg: float = 35,
     smoke_radius_m=None,
-    search_angle_deg: float = 40,
+    search_angle_deg: float = 30,
     search_radius_m=None,
     smoke_threshold: float = 0.50,
 ):
