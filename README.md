@@ -144,17 +144,15 @@ cd backend
 ```
 
 ### Chạy 5 vị trí cháy mặc định
-
-```powershell
 python run_experiments.py <mission_id>
-VD: python run_experiments.py 17
+```powershell
+python run_experiments.py 17
 ```
 
 ### Chạy 100 vị trí cháy
-
-```powershell
 python run_experiments.py <mission_id> <so_vi_tri_chay>
-VD: python run_experiments.py 17 100
+```powershell
+python run_experiments.py 17 100
 ```
 
 **Thay `17` bằng Mission ID thực tế.** Tham số thứ hai (`100`) ghi đè `DEFAULT_FIRE_LOCATIONS = 5`; nó **không bị giới hạn ở 5**. Số vị trí cháy yêu cầu phải không vượt quá số GridCell thực tế của khu vực.
