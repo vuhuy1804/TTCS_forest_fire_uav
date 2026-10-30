@@ -153,7 +153,7 @@ VD: python run_experiments.py 17
 ### Chạy 100 vị trí cháy
 
 ```powershell
-python run_experiments.py <mission_id> 100 <so_vi_tri_chay>
+python run_experiments.py <mission_id> <so_vi_tri_chay>
 VD: python run_experiments.py 17 100
 ```
 
