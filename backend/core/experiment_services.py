@@ -556,6 +556,341 @@ def simulate_kmeans(
     )
 
 
+# def simulate_kmeans_wind(
+#     cells: List[GridCell],
+#     routes_by_uav: Dict[int, Dict],
+#     fire_cell: GridCell,
+#     wind_direction_deg: float,
+#     uav_speed_mps: float,
+#     smoke_angle_deg: float,
+#     smoke_radius_m: float,
+#     search_angle_deg: float,
+#     search_radius_m: float,
+#     smoke_threshold: float,
+# ) -> Dict:
+#     """
+#     Chiến lược 3
+
+#     K-means + ngưỡng nồng độ khói + hướng gió.
+
+#     Quy trình:
+
+#         UAV bay theo route K-means
+#                     ↓
+#         tính nồng độ khói tại cell
+#                     ↓
+#         concentration >= threshold ?
+#               ↓                 ↓
+#              NO                YES
+#               ↓                 ↓
+#         tiếp tục bay       dùng hướng gió
+#                                ↓
+#                      tìm fire candidates
+#                                ↓
+#                          tiếp tục kiểm tra
+
+#     Hướng gió chỉ được sử dụng SAU KHI UAV
+#     phát hiện nồng độ khói vượt ngưỡng.
+#     """
+
+#     if not routes_by_uav:
+#         return _result(
+#             strategy="kmeans_wind",
+#             label="3) K-means + ngưỡng khói + hướng gió",
+#             detected=False,
+#             detected_time_seconds=None,
+#             detected_by_uav=None,
+#             checked_cells=0,
+#             extra={
+#                 "detail": (
+#                     "Chưa có route K-means. "
+#                     "Hãy Run K-means và Generate Routes trước."
+#                 )
+#             },
+#         )
+
+#     # =========================================================
+#     # INDEX ROUTE
+#     # =========================================================
+
+#     base_index_by_uav = {
+#         uav_id: 0
+#         for uav_id in routes_by_uav.keys()
+#     }
+
+#     # Route ưu tiên được tạo sau khi phát hiện khói
+#     priority_route_by_uav = {
+#         uav_id: []
+#         for uav_id in routes_by_uav.keys()
+#     }
+
+#     # =========================================================
+#     # THỜI GIAN / QUÃNG ĐƯỜNG
+#     # =========================================================
+
+#     uav_times = {
+#         uav_id: 0.0
+#         for uav_id in routes_by_uav.keys()
+#     }
+
+#     uav_distances = {
+#         uav_id: 0.0
+#         for uav_id in routes_by_uav.keys()
+#     }
+
+#     previous_cells = {
+#         uav_id: None
+#         for uav_id in routes_by_uav.keys()
+#     }
+
+#     # =========================================================
+#     # THỐNG KÊ
+#     # =========================================================
+
+#     checked_cells = 0
+
+#     first_smoke_cell_id = None
+#     first_smoke_by_uav = None
+#     first_smoke_concentration = None
+
+#     wind_reroute_events = []
+
+#     max_steps = (
+#         max(len(item["route"]) for item in routes_by_uav.values())
+#         + len(cells)
+#         + 10
+#     )
+
+#     # =========================================================
+#     # MÔ PHỎNG
+#     # =========================================================
+
+#     for step in range(max_steps):
+
+#         any_uav_moved = False
+
+#         for uav_id in sorted(routes_by_uav.keys()):
+
+#             item = routes_by_uav[uav_id]
+
+#             route = item["route"]
+
+#             current_cell = None
+#             movement_mode = "kmeans_route"
+
+#             # -------------------------------------------------
+#             # Nếu UAV đang có danh sách candidate ưu tiên
+#             # -------------------------------------------------
+
+#             if priority_route_by_uav[uav_id]:
+
+#                 current_cell = priority_route_by_uav[uav_id].pop(0)
+
+#                 movement_mode = "wind_candidate"
+
+#             # -------------------------------------------------
+#             # Nếu không có candidate thì tiếp tục route K-means
+#             # -------------------------------------------------
+
+#             else:
+
+#                 base_index = base_index_by_uav[uav_id]
+
+#                 if base_index < len(route):
+
+#                     current_cell = route[base_index]
+
+#                     base_index_by_uav[uav_id] = base_index + 1
+
+#             if current_cell is None:
+#                 continue
+
+#             any_uav_moved = True
+
+#             checked_cells += 1
+
+#             # =================================================
+#             # TÍNH QUÃNG ĐƯỜNG + THỜI GIAN
+#             # =================================================
+
+#             if previous_cells[uav_id] is not None:
+
+#                 distance = _meters_between(
+#                     previous_cells[uav_id],
+#                     current_cell,
+#                 )
+
+#                 uav_distances[uav_id] += distance
+
+#                 uav_times[uav_id] += (
+#                     distance / uav_speed_mps
+#                 )
+
+#             previous_cells[uav_id] = current_cell
+
+#             # =================================================
+#             # KIỂM TRA ĐÃ ĐẾN FIRE CELL CHƯA
+#             # =================================================
+
+#             if current_cell.id == fire_cell.id:
+
+#                 return _result(
+#                     strategy="kmeans_wind",
+#                     label="3) K-means + ngưỡng khói + hướng gió",
+#                     detected=True,
+#                     detected_time_seconds=uav_times[uav_id],
+#                     detected_by_uav=item["uav_name"],
+#                     checked_cells=checked_cells,
+#                     extra={
+#                         "smoke_detected": (
+#                             first_smoke_cell_id is not None
+#                         ),
+
+#                         "first_smoke_cell_id": (
+#                             first_smoke_cell_id
+#                         ),
+
+#                         "first_smoke_by_uav": (
+#                             first_smoke_by_uav
+#                         ),
+
+#                         "first_smoke_concentration": (
+#                             first_smoke_concentration
+#                         ),
+
+#                         "smoke_threshold": smoke_threshold,
+
+#                         "movement_mode_when_detected": (
+#                             movement_mode
+#                         ),
+
+#                         "wind_reroute_events": (
+#                             wind_reroute_events
+#                         ),
+
+#                         "travel_distance_m": round(
+#                             uav_distances[uav_id],
+#                             2,
+#                         ),
+#                     },
+#                 )
+
+#             # =================================================
+#             # TÍNH NỒNG ĐỘ KHÓI
+#             # =================================================
+
+#             concentration = _calculate_smoke_concentration(
+#                 source_cell=fire_cell,
+#                 target_cell=current_cell,
+#                 smoke_radius_m=smoke_radius_m,
+#             )
+
+#             # =================================================
+#             # KIỂM TRA NGƯỠNG KHÓI
+#             # =================================================
+
+#             smoke_detected = _is_smoke_detected(
+#                 concentration=concentration,
+#                 smoke_threshold=smoke_threshold,
+#             )
+
+#             # Không đủ nồng độ → UAV tiếp tục route bình thường
+#             if not smoke_detected:
+#                 continue
+
+#             # =================================================
+#             # ĐÃ PHÁT HIỆN KHÓI
+#             # =================================================
+
+#             if first_smoke_cell_id is None:
+
+#                 first_smoke_cell_id = current_cell.id
+
+#                 first_smoke_by_uav = item["uav_name"]
+
+#                 first_smoke_concentration = round(
+#                     concentration,
+#                     6,
+#                 )
+
+#             # =================================================
+#             # DÙNG HƯỚNG GIÓ ĐỂ TÌM CANDIDATE
+#             # =================================================
+
+#             candidates = _infer_fire_candidates_from_smoke(
+#                 smoke_cell=current_cell,
+#                 cells=item["route"],
+#                 wind_direction_deg=wind_direction_deg,
+#                 search_angle_deg=search_angle_deg,
+#                 search_radius_m=search_radius_m,
+#             )
+
+#             wind_reroute_events.append({
+#                 "uav_id": uav_id,
+
+#                 "uav_name": item["uav_name"],
+
+#                 "smoke_cell_id": current_cell.id,
+
+#                 "smoke_concentration": round(
+#                     concentration,
+#                     6,
+#                 ),
+
+#                 "smoke_threshold": smoke_threshold,
+
+#                 "candidate_count": len(candidates),
+
+#                 "candidate_cell_ids": [
+#                     c.id
+#                     for c in candidates[:20]
+#                 ],
+#             })
+
+#             # CHỈ GÁN LỘ TRÌNH MỚI NẾU UAV ĐANG TRỐNG LỘ TRÌNH CANDIDATE
+#             # (Tránh việc cứ đến ô mới có khói lại ghi đè danh sách làm UAV xoay vòng vô tận)
+#             if candidates and not priority_route_by_uav[uav_id]:
+
+#                 priority_route_by_uav[uav_id] = candidates[:5]  # Chỉ lấy Top 5 ô nghi vấn nhất
+
+#     # =========================================================
+#     # KHÔNG PHÁT HIỆN FIRE
+#     # =========================================================
+
+#     return _result(
+#         strategy="kmeans_wind",
+#         label="3) K-means + ngưỡng khói + hướng gió",
+#         detected=False,
+#         detected_time_seconds=None,
+#         detected_by_uav=None,
+#         checked_cells=checked_cells,
+#         extra={
+#             "smoke_detected": (
+#                 first_smoke_cell_id is not None
+#             ),
+
+#             "first_smoke_cell_id": (
+#                 first_smoke_cell_id
+#             ),
+
+#             "first_smoke_by_uav": (
+#                 first_smoke_by_uav
+#             ),
+
+#             "first_smoke_concentration": (
+#                 first_smoke_concentration
+#             ),
+
+#             "smoke_threshold": (
+#                 smoke_threshold
+#             ),
+
+#             "wind_reroute_events": (
+#                 wind_reroute_events
+#             ),
+#         },
+#     )
+
 def simulate_kmeans_wind(
     cells: List[GridCell],
     routes_by_uav: Dict[int, Dict],
@@ -568,258 +903,129 @@ def simulate_kmeans_wind(
     search_radius_m: float,
     smoke_threshold: float,
 ) -> Dict:
+    """Strategy 3: K-means route + smoke threshold + wind-guided candidates.
+
+    Optimizations over the original implementation:
+    - Apply wind direction when computing the smoke signal.
+    - Never inspect the same cell twice for the same UAV.
+    - Do not enqueue already visited candidate cells.
+    - Process each smoke cell at most once per UAV, preventing repeated reroutes.
+    - Preserve the original K-means route and resume it after checking candidates.
+
+    Note: the smoke field still uses fire_cell as the simulated source. This is
+    a synthetic benchmark assumption, not a sensor/atmospheric simulation.
     """
-    Chiến lược 3
-
-    K-means + ngưỡng nồng độ khói + hướng gió.
-
-    Quy trình:
-
-        UAV bay theo route K-means
-                    ↓
-        tính nồng độ khói tại cell
-                    ↓
-        concentration >= threshold ?
-              ↓                 ↓
-             NO                YES
-              ↓                 ↓
-        tiếp tục bay       dùng hướng gió
-                               ↓
-                     tìm fire candidates
-                               ↓
-                         tiếp tục kiểm tra
-
-    Hướng gió chỉ được sử dụng SAU KHI UAV
-    phát hiện nồng độ khói vượt ngưỡng.
-    """
-
+    label = "3) K-means + ngưỡng khói + hướng gió"
     if not routes_by_uav:
         return _result(
-            strategy="kmeans_wind",
-            label="3) K-means + ngưỡng khói + hướng gió",
-            detected=False,
-            detected_time_seconds=None,
-            detected_by_uav=None,
-            checked_cells=0,
-            extra={
-                "detail": (
-                    "Chưa có route K-means. "
-                    "Hãy Run K-means và Generate Routes trước."
-                )
-            },
+            strategy="kmeans_wind", label=label, detected=False,
+            detected_time_seconds=None, detected_by_uav=None, checked_cells=0,
+            extra={"detail": "Chưa có route K-means. Hãy Run K-means và Generate Routes trước."},
         )
 
-    # =========================================================
-    # INDEX ROUTE
-    # =========================================================
-
-    base_index_by_uav = {
-        uav_id: 0
-        for uav_id in routes_by_uav.keys()
-    }
-
-    # Route ưu tiên được tạo sau khi phát hiện khói
-    priority_route_by_uav = {
-        uav_id: []
-        for uav_id in routes_by_uav.keys()
-    }
-
-    # =========================================================
-    # THỜI GIAN / QUÃNG ĐƯỜNG
-    # =========================================================
-
-    uav_times = {
-        uav_id: 0.0
-        for uav_id in routes_by_uav.keys()
-    }
-
-    uav_distances = {
-        uav_id: 0.0
-        for uav_id in routes_by_uav.keys()
-    }
-
-    previous_cells = {
-        uav_id: None
-        for uav_id in routes_by_uav.keys()
-    }
-
-    # =========================================================
-    # THỐNG KÊ
-    # =========================================================
+    uav_ids = sorted(routes_by_uav)
+    base_index_by_uav = {uid: 0 for uid in uav_ids}
+    priority_route_by_uav = {uid: [] for uid in uav_ids}
+    visited_by_uav = {uid: set() for uid in uav_ids}
+    processed_smoke_by_uav = {uid: set() for uid in uav_ids}
+    uav_times = {uid: 0.0 for uid in uav_ids}
+    uav_distances = {uid: 0.0 for uid in uav_ids}
+    previous_cells = {uid: None for uid in uav_ids}
 
     checked_cells = 0
-
     first_smoke_cell_id = None
     first_smoke_by_uav = None
     first_smoke_concentration = None
-
     wind_reroute_events = []
 
-    max_steps = (
-        max(len(item["route"]) for item in routes_by_uav.values())
-        + len(cells)
-        + 10
-    )
+    # Each loop advances each UAV by at most one new cell. A priority candidate
+    # is drawn from that UAV's assigned route, so the total unique visits is bounded.
+    max_steps = sum(len(item.get("route", [])) for item in routes_by_uav.values()) + len(uav_ids) + 1
 
-    # =========================================================
-    # MÔ PHỎNG
-    # =========================================================
-
-    for step in range(max_steps):
-
+    for _ in range(max_steps):
         any_uav_moved = False
-
-        for uav_id in sorted(routes_by_uav.keys()):
-
+        for uav_id in uav_ids:
             item = routes_by_uav[uav_id]
-
-            route = item["route"]
-
+            route = item.get("route", [])
             current_cell = None
             movement_mode = "kmeans_route"
 
-            # -------------------------------------------------
-            # Nếu UAV đang có danh sách candidate ưu tiên
-            # -------------------------------------------------
+            # Discard candidates already visited (e.g. duplicates in a route).
+            while priority_route_by_uav[uav_id] and priority_route_by_uav[uav_id][0].id in visited_by_uav[uav_id]:
+                priority_route_by_uav[uav_id].pop(0)
 
             if priority_route_by_uav[uav_id]:
-
                 current_cell = priority_route_by_uav[uav_id].pop(0)
-
                 movement_mode = "wind_candidate"
-
-            # -------------------------------------------------
-            # Nếu không có candidate thì tiếp tục route K-means
-            # -------------------------------------------------
-
             else:
-
-                base_index = base_index_by_uav[uav_id]
-
-                if base_index < len(route):
-
-                    current_cell = route[base_index]
-
-                    base_index_by_uav[uav_id] = base_index + 1
+                # Resume original route, skipping cells already checked via rerouting.
+                while base_index_by_uav[uav_id] < len(route):
+                    candidate = route[base_index_by_uav[uav_id]]
+                    base_index_by_uav[uav_id] += 1
+                    if candidate.id not in visited_by_uav[uav_id]:
+                        current_cell = candidate
+                        break
 
             if current_cell is None:
                 continue
 
             any_uav_moved = True
-
+            visited_by_uav[uav_id].add(current_cell.id)
             checked_cells += 1
 
-            # =================================================
-            # TÍNH QUÃNG ĐƯỜNG + THỜI GIAN
-            # =================================================
-
-            if previous_cells[uav_id] is not None:
-
-                distance = _meters_between(
-                    previous_cells[uav_id],
-                    current_cell,
-                )
-
+            previous = previous_cells[uav_id]
+            if previous is not None:
+                distance = _meters_between(previous, current_cell)
                 uav_distances[uav_id] += distance
-
-                uav_times[uav_id] += (
-                    distance / uav_speed_mps
-                )
+                if uav_speed_mps > 0:
+                    uav_times[uav_id] += distance / uav_speed_mps
 
             previous_cells[uav_id] = current_cell
 
-            # =================================================
-            # KIỂM TRA ĐÃ ĐẾN FIRE CELL CHƯA
-            # =================================================
-
             if current_cell.id == fire_cell.id:
-
                 return _result(
-                    strategy="kmeans_wind",
-                    label="3) K-means + ngưỡng khói + hướng gió",
-                    detected=True,
+                    strategy="kmeans_wind", label=label, detected=True,
                     detected_time_seconds=uav_times[uav_id],
-                    detected_by_uav=item["uav_name"],
-                    checked_cells=checked_cells,
+                    detected_by_uav=item["uav_name"], checked_cells=checked_cells,
                     extra={
-                        "smoke_detected": (
-                            first_smoke_cell_id is not None
-                        ),
-
-                        "first_smoke_cell_id": (
-                            first_smoke_cell_id
-                        ),
-
-                        "first_smoke_by_uav": (
-                            first_smoke_by_uav
-                        ),
-
-                        "first_smoke_concentration": (
-                            first_smoke_concentration
-                        ),
-
+                        "smoke_detected": first_smoke_cell_id is not None,
+                        "first_smoke_cell_id": first_smoke_cell_id,
+                        "first_smoke_by_uav": first_smoke_by_uav,
+                        "first_smoke_concentration": first_smoke_concentration,
                         "smoke_threshold": smoke_threshold,
-
-                        "movement_mode_when_detected": (
-                            movement_mode
-                        ),
-
-                        "wind_reroute_events": (
-                            wind_reroute_events
-                        ),
-
-                        "travel_distance_m": round(
-                            uav_distances[uav_id],
-                            2,
-                        ),
+                        "movement_mode_when_detected": movement_mode,
+                        "wind_reroute_events": wind_reroute_events,
+                        "travel_distance_m": round(uav_distances[uav_id], 2),
+                        "unique_checked_cells_by_detecting_uav": len(visited_by_uav[uav_id]),
                     },
                 )
-
-            # =================================================
-            # TÍNH NỒNG ĐỘ KHÓI
-            # =================================================
 
             concentration = _calculate_smoke_concentration(
                 source_cell=fire_cell,
                 target_cell=current_cell,
                 smoke_radius_m=smoke_radius_m,
+                wind_direction_deg=wind_direction_deg,
+                smoke_angle_deg=smoke_angle_deg,
             )
-
-            # =================================================
-            # KIỂM TRA NGƯỠNG KHÓI
-            # =================================================
-
-            smoke_detected = _is_smoke_detected(
-                concentration=concentration,
-                smoke_threshold=smoke_threshold,
-            )
-
-            # Không đủ nồng độ → UAV tiếp tục route bình thường
-            if not smoke_detected:
+            if not _is_smoke_detected(concentration, smoke_threshold):
                 continue
 
-            # =================================================
-            # ĐÃ PHÁT HIỆN KHÓI
-            # =================================================
+            if current_cell.id in processed_smoke_by_uav[uav_id]:
+                continue
+            processed_smoke_by_uav[uav_id].add(current_cell.id)
 
             if first_smoke_cell_id is None:
-
                 first_smoke_cell_id = current_cell.id
-
                 first_smoke_by_uav = item["uav_name"]
+                first_smoke_concentration = round(concentration, 6)
 
-                first_smoke_concentration = round(
-                    concentration,
-                    6,
-                )
-
-            # =================================================
-            # DÙNG HƯỚNG GIÓ ĐỂ TÌM CANDIDATE
-            # =================================================
-
+            visited = visited_by_uav[uav_id]
+            # Filter before ranking/truncation so visited cells cannot crowd out
+            # still-unvisited candidates among the top five.
+            remaining_route_cells = [c for c in route if c.id not in visited]
             candidates = _infer_fire_candidates_from_smoke(
                 smoke_cell=current_cell,
-                cells=item["route"],
+                cells=remaining_route_cells,
                 wind_direction_deg=wind_direction_deg,
                 search_angle_deg=search_angle_deg,
                 search_radius_m=search_radius_m,
@@ -827,67 +1033,32 @@ def simulate_kmeans_wind(
 
             wind_reroute_events.append({
                 "uav_id": uav_id,
-
                 "uav_name": item["uav_name"],
-
                 "smoke_cell_id": current_cell.id,
-
-                "smoke_concentration": round(
-                    concentration,
-                    6,
-                ),
-
+                "smoke_concentration": round(concentration, 6),
                 "smoke_threshold": smoke_threshold,
-
                 "candidate_count": len(candidates),
-
-                "candidate_cell_ids": [
-                    c.id
-                    for c in candidates[:20]
-                ],
+                "candidate_cell_ids": [c.id for c in candidates[:5]],
             })
 
-            # CHỈ GÁN LỘ TRÌNH MỚI NẾU UAV ĐANG TRỐNG LỘ TRÌNH CANDIDATE
-            # (Tránh việc cứ đến ô mới có khói lại ghi đè danh sách làm UAV xoay vòng vô tận)
+            # Only one short priority queue at a time; no duplicate cell visits.
             if candidates and not priority_route_by_uav[uav_id]:
+                priority_route_by_uav[uav_id] = candidates[:5]
 
-                priority_route_by_uav[uav_id] = candidates[:5]  # Chỉ lấy Top 5 ô nghi vấn nhất
-
-    # =========================================================
-    # KHÔNG PHÁT HIỆN FIRE
-    # =========================================================
+        if not any_uav_moved:
+            break
 
     return _result(
-        strategy="kmeans_wind",
-        label="3) K-means + ngưỡng khói + hướng gió",
-        detected=False,
-        detected_time_seconds=None,
-        detected_by_uav=None,
-        checked_cells=checked_cells,
+        strategy="kmeans_wind", label=label, detected=False,
+        detected_time_seconds=None, detected_by_uav=None, checked_cells=checked_cells,
         extra={
-            "smoke_detected": (
-                first_smoke_cell_id is not None
-            ),
-
-            "first_smoke_cell_id": (
-                first_smoke_cell_id
-            ),
-
-            "first_smoke_by_uav": (
-                first_smoke_by_uav
-            ),
-
-            "first_smoke_concentration": (
-                first_smoke_concentration
-            ),
-
-            "smoke_threshold": (
-                smoke_threshold
-            ),
-
-            "wind_reroute_events": (
-                wind_reroute_events
-            ),
+            "smoke_detected": first_smoke_cell_id is not None,
+            "first_smoke_cell_id": first_smoke_cell_id,
+            "first_smoke_by_uav": first_smoke_by_uav,
+            "first_smoke_concentration": first_smoke_concentration,
+            "smoke_threshold": smoke_threshold,
+            "wind_reroute_events": wind_reroute_events,
+            "unique_checked_cells_total": sum(len(v) for v in visited_by_uav.values()),
         },
     )
 
