@@ -1,268 +1,174 @@
-# backend/run_experiments.py
-
-import os
-import sys
+"""Paired 2D benchmark over distinct fire cells; not the full ROS/Gazebo experiment."""
+import argparse
 import csv
 import json
 import math
+import random
 import statistics
-from pathlib import Path
+from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
+import os
 
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 import django
-
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
 django.setup()
-
 from core.models import Mission, GridCell
 from core.experiment_services import compare_detection_strategies
 
-
-# =========================
-# CẤU HÌNH THỬ NGHIỆM
-# =========================
-
-DEFAULT_FIRE_LOCATIONS = 5
+DEFAULT_FIRE_LOCATIONS = 5  # Used ONLY when positional argument is omitted
 UAV_SPEED_MPS = 10.0
 WIND_DIRECTION_DEG = 225.0
 SMOKE_THRESHOLD = 0.50
+OUTPUT_DIR = Path(__file__).resolve().parent / 'benchmark_data'
+STRATEGY_IDS = ('no_kmeans', 'kmeans', 'kmeans_wind', 'kmeans_swarm')
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "benchmark_data"
 
+def select_fire_cells(cells, number, seed=42):
+    """Reproducible sample of distinct fire cells without replacement.
 
-def select_fire_cells(cells, number):
+    Selecting different cells is NOT independent environmental randomization.
     """
-    Chọn các ô phân bố đều theo danh sách ô lưới đã sắp xếp.
-    Kết quả có thể tái lập khi danh sách ô không thay đổi.
-    """
-    cells = list(cells)
+    ordered = sorted(cells, key=lambda c: (c.row, c.col, c.id))
+    if not 1 <= number <= len(ordered):
+        raise ValueError(f'Số vị trí cháy phải trong [1,{len(ordered)}].')
+    rng = random.Random(seed)
+    return rng.sample(ordered, number)
 
-    if not cells:
-        raise ValueError("Mission không có ô lưới nào.")
 
-    if number < 1:
-        raise ValueError("Số vị trí cháy phải >= 1.")
+def _num(x, digits=2):
+    return '' if x is None else round(float(x), digits)
 
-    if number > len(cells):
-        raise ValueError(
-            f"Yêu cầu {number} vị trí nhưng chỉ có {len(cells)} ô lưới."
-        )
 
-    if number == 1:
-        return [cells[len(cells) // 2]]
-
-    indexes = [
-        round(i * (len(cells) - 1) / (number - 1))
-        for i in range(number)
-    ]
-
-    return [cells[i] for i in indexes]
+def _mean(values):
+    return statistics.mean(values) if values else None
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(
-            "Cách chạy: python run_experiments.py <MISSION_ID> [SO_VI_TRI_CHAY]"
-        )
-        sys.exit(1)
-
-    mission_id = int(sys.argv[1])
-    number_of_locations = (
-        int(sys.argv[2]) if len(sys.argv) >= 3
-        else DEFAULT_FIRE_LOCATIONS
-    )
-
-    mission = Mission.objects.select_related("area").get(id=mission_id)
-
-    cells = list(
-        GridCell.objects.filter(area=mission.area)
-        .order_by("row", "col", "id")
-    )
-
-    fire_cells = select_fire_cells(cells, number_of_locations)
-
+    parser = argparse.ArgumentParser(description='Thực nghiệm 4 thuật toán UAV trên cùng bộ cell cháy.')
+    parser.add_argument('mission_id', type=int)
+    parser.add_argument('number_of_locations', nargs='?', type=int, default=DEFAULT_FIRE_LOCATIONS)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--horizon', type=float, default=None,
+                        help='Giới hạn thời gian nhiệm vụ chung, giây; mặc định không giới hạn.')
+    parser.add_argument('--wind', type=float, default=WIND_DIRECTION_DEG)
+    parser.add_argument('--speed', type=float, default=UAV_SPEED_MPS)
+    parser.add_argument('--threshold', type=float, default=SMOKE_THRESHOLD)
+    args = parser.parse_args()
+    if args.horizon is not None and (not math.isfinite(args.horizon) or args.horizon <= 0):
+        parser.error('--horizon phải hữu hạn và > 0')
+    mission = Mission.objects.select_related('area').get(pk=args.mission_id)
+    cells = list(GridCell.objects.filter(area=mission.area).order_by('row', 'col', 'id'))
+    fires = select_fire_cells(cells, args.number_of_locations, args.seed)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # File 1: Chi tiết từng lần chạy
-    output_file = OUTPUT_DIR / (
-        f"mission_{mission_id}_pilot_{timestamp}.csv"
-    )
-
-    # File 2: Bảng tổng hợp so sánh chỉ số
-    summary_file = OUTPUT_DIR / (
-        f"mission_{mission_id}_summary_{timestamp}.csv"
-    )
-
-    columns = [
-        "experiment_id",
-        "mission_id",
-        "area_id",
-        "fire_cell_id",
-        "fire_row",
-        "fire_col",
-        "strategy",
-        "detected",
-        "detection_time_seconds",
-        "travel_distance_m",
-        "checked_cells",
-        "detected_by_uav",
-        "uav_speed_mps",
-        "wind_direction_deg",
-        "smoke_threshold",
-        "status",
-        "error",
-        "raw_result_json",
-    ]
-
-    total_rows = 0
-
-    # Bộ lưu trữ dữ liệu để tính toán bảng tổng hợp
-    summary_data = {}
-
-    with output_file.open(
-        "w", newline="", encoding="utf-8-sig"
-    ) as file:
-        writer = csv.DictWriter(file, fieldnames=columns)
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+    detail_path = OUTPUT_DIR / f'mission_{mission.id}_detail_{stamp}.csv'
+    summary_path = OUTPUT_DIR / f'mission_{mission.id}_summary_{stamp}.csv'
+    config_path = OUTPUT_DIR / f'mission_{mission.id}_config_{stamp}.json'
+    config_path.write_text(json.dumps({
+        'mission_id': mission.id, 'area_id': mission.area_id,
+        'fire_cell_ids': [c.id for c in fires], 'seed': args.seed,
+        'horizon_seconds': args.horizon, 'wind_direction_deg': args.wind,
+        'uav_speed_mps': args.speed, 'smoke_threshold': args.threshold,
+        'note': '100 distinct fire cells are not 100 independent noise/wind realizations',
+    }, ensure_ascii=False, indent=2), encoding='utf-8')
+    fields = ['experiment_id','mission_id','area_id','fire_cell_id','fire_row','fire_col',
+              'strategy_id','strategy','detected','detection_time_seconds',
+              'elapsed_simulation_seconds','termination_reason','travel_distance_m',
+              'fleet_travel_distance_m','checked_cells','unique_checked_cells',
+              'detected_by_uav','first_smoke_time_seconds','search_triggers',
+              'swarm_iterations','pso_revisits','pso_recovery_steps',
+              'shared_best_used','wind_reroute_count','mission_horizon_seconds',
+              'uav_speed_mps','wind_direction_deg','smoke_threshold','status','error','raw_result_json']
+    grouped = defaultdict(list)
+    errors = []
+    with detail_path.open('w', newline='', encoding='utf-8-sig') as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-
-        for index, fire_cell in enumerate(fire_cells, start=1):
-            experiment_id = f"M{mission_id}_F{fire_cell.id}"
-
-            print(
-                f"[{index}/{len(fire_cells)}] "
-                f"Mission {mission_id}, ô cháy {fire_cell.id}"
-            )
-
+        for index, fire in enumerate(fires, 1):
+            base = dict(experiment_id=f'M{mission.id}_F{fire.id}', mission_id=mission.id,
+                        area_id=mission.area_id, fire_cell_id=fire.id,
+                        fire_row=fire.row, fire_col=fire.col,
+                        mission_horizon_seconds=args.horizon, uav_speed_mps=args.speed,
+                        wind_direction_deg=args.wind, smoke_threshold=args.threshold)
+            print(f'[{index}/{len(fires)}] cell cháy {fire.id}')
             try:
-                comparison = compare_detection_strategies(
-                    mission=mission,
-                    fire_cell_id=fire_cell.id,
-                    wind_direction_deg=WIND_DIRECTION_DEG,
-                    uav_speed_mps=UAV_SPEED_MPS,
-                    smoke_threshold=SMOKE_THRESHOLD,
-                )
-
-                results = comparison.get("results", [])
-
-                if not results:
-                    raise ValueError("Không có kết quả chiến lược.")
-
-                for result in results:
-                    detected = bool(result.get("detected", False))
-                    detection_time = result.get(
-                        "detected_time_seconds"
-                    )
-                    distance = result.get("travel_distance_m")
-                    strategy_label = result.get(
-                        "label", result.get("strategy", "unknown")
-                    )
-
-                    # Không ghi thời gian bằng 0 nếu chưa phát hiện.
-                    if not detected:
-                        detection_time = None
-                    else:
-                        # Tích lũy dữ liệu tính tổng hợp cho các case phát hiện thành công
-                        if strategy_label not in summary_data:
-                            summary_data[strategy_label] = {
-                                "times": [],
-                                "checked_cells": [],
-                            }
-                        summary_data[strategy_label]["times"].append(detection_time)
-                        summary_data[strategy_label]["checked_cells"].append(
-                            result.get("checked_cells", 0)
-                        )
-
-                    writer.writerow({
-                        "experiment_id": experiment_id,
-                        "mission_id": mission.id,
-                        "area_id": mission.area_id,
-                        "fire_cell_id": fire_cell.id,
-                        "fire_row": fire_cell.row,
-                        "fire_col": fire_cell.col,
-                        "strategy": strategy_label,
-                        "detected": detected,
-                        "detection_time_seconds": detection_time,
-                        "travel_distance_m": distance,
-                        "checked_cells": result.get("checked_cells"),
-                        "detected_by_uav": result.get("detected_by_uav"),
-                        "uav_speed_mps": UAV_SPEED_MPS,
-                        "wind_direction_deg": WIND_DIRECTION_DEG,
-                        "smoke_threshold": SMOKE_THRESHOLD,
-                        "status": "ok",
-                        "error": "",
-                        # Giữ lại toàn bộ kết quả gốc để phân tích sau.
-                        "raw_result_json": json.dumps(
-                            result, ensure_ascii=False, default=str
-                        ),
-                    })
-                    total_rows += 1
-
-                file.flush()
-
+                response = compare_detection_strategies(
+                    mission=mission, fire_cell_id=fire.id,
+                    wind_direction_deg=args.wind, uav_speed_mps=args.speed,
+                    smoke_threshold=args.threshold, mission_horizon_seconds=args.horizon)
+                results = response.get('results', [])
+                ids = [r.get('strategy') for r in results]
+                if len(results) != len(STRATEGY_IDS) or set(ids) != set(STRATEGY_IDS):
+                    raise ValueError(f'Thiếu hoặc trùng chiến lược: {ids}')
+                # Commit all four results together only after validating the scenario.
+                rows = []
+                for r in results:
+                    detected = bool(r.get('detected'))
+                    t = r.get('detected_time_seconds')
+                    if detected != (t is not None):
+                        raise ValueError(f'Thời gian/trạng thái không nhất quán: {r.get("strategy")}')
+                    row = dict(base, strategy_id=r['strategy'], strategy=r['label'],
+                        detected=detected, detection_time_seconds=t,
+                        elapsed_simulation_seconds=r.get('elapsed_simulation_seconds'),
+                        termination_reason=r.get('termination_reason'),
+                        travel_distance_m=r.get('travel_distance_m'),
+                        fleet_travel_distance_m=r.get('fleet_travel_distance_m'),
+                        checked_cells=r.get('checked_cells'),
+                        unique_checked_cells=r.get('unique_checked_cells'),
+                        detected_by_uav=r.get('detected_by_uav'),
+                        first_smoke_time_seconds=r.get('first_smoke_time_seconds'),
+                        search_triggers=r.get('search_triggers',0),
+                        swarm_iterations=r.get('swarm_iterations',0),
+                        pso_revisits=r.get('pso_revisits',0),
+                        pso_recovery_steps=r.get('pso_recovery_steps',0),
+                        shared_best_used=r.get('shared_best_used',0),
+                        wind_reroute_count=len(r.get('wind_reroute_events',[])),
+                        status='ok', error='', raw_result_json=json.dumps(r,ensure_ascii=False,default=str))
+                    rows.append(row)
+                for row in rows:
+                    writer.writerow(row)
+                    grouped[row['strategy_id']].append(row)
             except Exception as exc:
-                # Ghi lại lỗi để không âm thầm bỏ qua vị trí cháy.
-                writer.writerow({
-                    "experiment_id": experiment_id,
-                    "mission_id": mission.id,
-                    "area_id": mission.area_id,
-                    "fire_cell_id": fire_cell.id,
-                    "fire_row": fire_cell.row,
-                    "fire_col": fire_cell.col,
-                    "strategy": "ALL",
-                    "detected": "",
-                    "detection_time_seconds": "",
-                    "travel_distance_m": "",
-                    "checked_cells": "",
-                    "detected_by_uav": "",
-                    "uav_speed_mps": UAV_SPEED_MPS,
-                    "wind_direction_deg": WIND_DIRECTION_DEG,
-                    "smoke_threshold": SMOKE_THRESHOLD,
-                    "status": "error",
-                    "error": str(exc),
-                    "raw_result_json": "",
-                })
-                file.flush()
-
-                print(f"  LỖI: {exc}")
-
-    # =========================================================
-    # TẠO FILE CSV BẢNG TỔNG HỢP SO SÁNH
-    # =========================================================
-    summary_columns = [
-        "Chiến lược",
-        "Thời gian TB (giây)",
-        "Trung vị thời gian (giây)",
-        "Số ô kiểm tra TB",
-    ]
-
-    with summary_file.open("w", newline="", encoding="utf-8-sig") as sum_file:
-        sum_writer = csv.DictWriter(sum_file, fieldnames=summary_columns)
-        sum_writer.writeheader()
-
-        for strat_label, data in summary_data.items():
-            times = data["times"]
-            checked = data["checked_cells"]
-
-            mean_time = statistics.mean(times) if times else 0.0
-            median_time = statistics.median(times) if times else 0.0
-            mean_checked = statistics.mean(checked) if checked else 0.0
-
-            sum_writer.writerow({
-                "Chiến lược": strat_label,
-                "Thời gian TB (giây)": round(mean_time, 2),
-                "Trung vị thời gian (giây)": round(median_time, 2),
-                "Số ô kiểm tra TB": round(mean_checked, 1),
+                errors.append((fire.id, str(exc)))
+                writer.writerow(dict(base, strategy_id='ALL', strategy='ALL', status='error', error=str(exc)))
+                print(f'  LỖI: {exc}')
+            handle.flush()
+    summaries = ['Chiến lược','Số kịch bản hợp lệ','Số thành công','Số thất bại',
+                 'Tỷ lệ thành công (%)','Thời gian TB khi thành công (giây)',
+                 'Trung vị khi thành công (giây)','Độ lệch chuẩn thời gian (giây)',
+                 'Số lượt quan sát TB','Số cell duy nhất TB','Quãng đường toàn đội TB (m)',
+                 'Số kích hoạt SEARCH TB','Số revisit PSO TB','Số bước phục hồi PSO TB']
+    with summary_path.open('w', newline='', encoding='utf-8-sig') as handle:
+        writer = csv.DictWriter(handle, fieldnames=summaries)
+        writer.writeheader()
+        for sid in STRATEGY_IDS:
+            rows = grouped[sid]
+            if not rows:
+                continue
+            successful = [r for r in rows if r['detected']]
+            times = [float(r['detection_time_seconds']) for r in successful]
+            def mean_field(key):
+                vals = [float(r[key]) for r in rows if r.get(key) is not None]
+                return _num(_mean(vals))
+            writer.writerow({
+                'Chiến lược': rows[0]['strategy'],
+                'Số kịch bản hợp lệ': len(rows), 'Số thành công': len(successful),
+                'Số thất bại': len(rows)-len(successful),
+                'Tỷ lệ thành công (%)': _num(100*len(successful)/len(rows)),
+                'Thời gian TB khi thành công (giây)': _num(_mean(times)),
+                'Trung vị khi thành công (giây)': _num(statistics.median(times) if times else None),
+                'Độ lệch chuẩn thời gian (giây)': _num(statistics.stdev(times) if len(times)>1 else None),
+                'Số lượt quan sát TB': mean_field('checked_cells'),
+                'Số cell duy nhất TB': mean_field('unique_checked_cells'),
+                'Quãng đường toàn đội TB (m)': mean_field('fleet_travel_distance_m'),
+                'Số kích hoạt SEARCH TB': mean_field('search_triggers'),
+                'Số revisit PSO TB': mean_field('pso_revisits'),
+                'Số bước phục hồi PSO TB': mean_field('pso_recovery_steps'),
             })
-
-    print("\nHoàn thành thử nghiệm.")
-    print(f"Mission ID: {mission_id}")
-    print(f"Số vị trí cháy: {len(fire_cells)}")
-    print(f"Số dòng kết quả chiến lược: {total_rows}")
-    print(f"File CSV chi tiết : {output_file}")
-    print(f"File CSV tổng hợp : {summary_file}")
+    print(f'Chi tiết: {detail_path}\nTổng hợp: {summary_path}\nCấu hình: {config_path}')
+    print(f'Kịch bản lỗi: {len(errors)}; kịch bản hợp lệ: {len(fires)-len(errors)}/{len(fires)}')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

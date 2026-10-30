@@ -1,5 +1,6 @@
 import math
 import heapq
+from collections import deque
 from typing import Dict, List, Optional, Set, Tuple
 
 from .models import GridCell, Mission, RouteWaypoint
@@ -380,6 +381,8 @@ MEMORY_WINDOW_SECONDS = 30.0        # paper's local sensor observation window
 CONCENTRATION_BACKGROUND = 0.0
 CONCENTRATION_SCALE = 0.25          # chosen simulation scaling; not calibrated
 MAX_RECORDED_EVENTS = 250           # avoid excessively large API responses
+# Optional common monitoring horizon; None keeps legacy until-route-end behavior.
+DEFAULT_MISSION_HORIZON_SECONDS = None
 
 
 def _bounded_smoke_score(concentration: float) -> float:
@@ -390,43 +393,59 @@ def _bounded_smoke_score(concentration: float) -> float:
 
 def _grid_neighbors(current_cell: GridCell, allowed_cells: List[GridCell],
                     already_observed: Set[int]) -> List[GridCell]:
-    """At most 8 *grid-adjacent* in-cluster candidates (not 8 nearest globally).
+    """Paper A1: at most eight adjacent in-region cells, INCLUDING revisits.
 
-    The route list is used as the accessible cell set because the existing
-    database doesn't expose collision-free path polygons in this module.
-    Unobserved neighbor preference guarantees a finite illustrative search.
+    The original implementation excluded visited cells and made the paper's
+    revisit penalty unreachable. Grid adjacency is checked by row/column.
     """
-    result = []
-    for c in allowed_cells:
-        if c.id in already_observed or c.id == current_cell.id:
-            continue
-        if max(abs(int(c.row)-int(current_cell.row)),
-               abs(int(c.col)-int(current_cell.col))) == 1:
-            result.append(c)
+    result = [c for c in allowed_cells
+              if c.id != current_cell.id
+              and max(abs(int(c.row)-int(current_cell.row)),
+                      abs(int(c.col)-int(current_cell.col))) == 1]
     return sorted(result, key=lambda c: (_meters_between(current_cell, c), c.id))[:8]
 
 
 def _local_observation_estimate(target: GridCell, observations: List[Tuple],
-                                timestamp: float, length_scale_m: float) -> float:
-    """Eq. (21), finite-memory inverse-distance/time weighting.
+                                timestamp: float, length_scale_m: float,
+                                wind_direction_deg: float = 0.0,
+                                wind_speed_mps: float = 0.0) -> float:
+    """Paper Eq.(21): finite-memory time/distance weighted concentration.
 
-    With current API only wind DIRECTION is available, not wind SPEED,
-    so no velocity-based advection can be calibrated. Observed sample
-    positions stay fixed; this is explicitly the stationary approximation.
-    Neither the source location nor the unobserved true plume is read here.
+    A sample can be transported *forward* along wind transport direction.
+    Wind speed defaults to ZERO because the existing static cone simulation
+    supplies direction but no time-dependent flow velocity. Nonzero wind speed
+    should only be selected with a consistent time-dependent plume model.
     """
-    numerator = 0.0
-    denominator = 0.0
-    length2 = max(1.0, length_scale_m)**2
+    numerator = denominator = 0.0
+    length2 = max(1e-6, float(length_scale_m))**2
+    angle = math.radians(wind_direction_deg)
     for sample_time, sample_cell, sample_concentration in observations:
-        age = timestamp - sample_time
-        if age < -1e-9 or age > MEMORY_WINDOW_SECONDS:
+        age = timestamp-sample_time
+        if not 0 <= age <= MEMORY_WINDOW_SECONDS:
             continue
-        d = _meters_between(target, sample_cell)
-        weight = math.exp(-max(0.0, age)/MEMORY_WINDOW_SECONDS)/(1.0+d*d/length2)
-        numerator += weight * sample_concentration
+        sample_east, sample_north = _relative_meters(target, sample_cell)
+        east = sample_east + wind_speed_mps*age*math.cos(angle)
+        north = sample_north + wind_speed_mps*age*math.sin(angle)
+        weight = math.exp(-age/MEMORY_WINDOW_SECONDS)/(1.0+(east*east+north*north)/length2)
+        numerator += weight*max(0.0, float(sample_concentration))
         denominator += weight
-    return numerator / denominator if denominator else 0.0
+    return numerator/denominator if denominator > 0 else 0.0
+
+
+def _relative_meters(a: GridCell, b: GridCell) -> Tuple[float, float]:
+    """Metric east/north offset from a to b."""
+    middle_lat = math.radians((_lat(a)+_lat(b))/2.0)
+    return ((_lng(b)-_lng(a))*111_320.0*math.cos(middle_lat),
+            (_lat(b)-_lat(a))*110_540.0)
+
+
+def _cell_spacing_m(cells: List[GridCell], current: GridCell) -> float:
+    """Grid spacing Δ for paper's l=2Δ interpolation bandwidth."""
+    distances = [_meters_between(current, c) for c in cells
+                 if c.id != current.id and
+                 max(abs(int(c.row)-int(current.row)),
+                     abs(int(c.col)-int(current.col))) == 1]
+    return min(distances) if distances else 1.0
 
 
 def _vector_direction(a: GridCell, b: GridCell) -> Tuple[float, float]:
@@ -462,71 +481,132 @@ def _upwind_candidates_for_observation(
     return candidates
 
 
+def _pso_recovery_step(state: Dict) -> Optional[GridCell]:
+    """Optional *2D simulation* escape from a fully observed neighborhood.
+
+    BFS uses only cluster cells and the UAV's own visited set; it never reads
+    the hidden fire location or plume. This is NOT a step in paper Algorithm A1.
+    Each returned step is adjacent, and its travel time is charged normally.
+    """
+    current = state['current']
+    by_position = {(int(c.row), int(c.col)): c for c in state['route']}
+    start = (int(current.row), int(current.col))
+    queue = deque([start])
+    predecessor = {start: None}
+    destination = None
+    while queue:
+        pos = queue.popleft()
+        if pos != start and by_position[pos].id not in state['observed_ids']:
+            destination = pos
+            break
+        r, col = pos
+        for dr in (-1, 0, 1):
+            for dc in (-1, 0, 1):
+                if not (dr or dc):
+                    continue
+                nxt = (r + dr, col + dc)
+                if nxt in by_position and nxt not in predecessor:
+                    predecessor[nxt] = pos
+                    queue.append(nxt)
+    if destination is None:
+        return None
+    while predecessor[destination] != start:
+        destination = predecessor[destination]
+    return by_position[destination]
+
+
 def _pick_discrete_pso_cell(state: Dict, now: float,
                             global_observations: List[Dict]) -> Optional[GridCell]:
-    """Observation-only cluster-constrained ACAK-LoPSO horizontal policy.
+    """ACAK-LoPSO-inspired *2D simulation variant*.
 
-    Uses paper: bounded concentration Eq.4, score Eq.5, sigmoid Eq.7,
-    directional memory Eq.8 and final ranking Eq.6. No oracle concentrations.
-    Shared record must have been observed, be fresh, and IN THIS CLUSTER.
-    This is a 2D adaptation: Eq.9/10 canopy height not available.
+    Retains paper's bounded concentration, pbest, eligible shared record,
+    dynamic weights, 8-neighbor ranking, two-cell revisit penalty and sigmoid
+    direction memory. Adds an explicitly labeled exploration safeguard to
+    prevent repeated A-B oscillations observed in the 2D simulation.
     """
-    current_cell = state['current']
-    neighbors = _grid_neighbors(current_cell, state['route'], state['observed_ids'])
+    current = state['current']
+    neighbors = _grid_neighbors(current, state['route'], state['observed_ids'])
     if not neighbors:
         return None
-    local = [r for r in state['samples'] if 0 <= now-r[0] <= MEMORY_WINDOW_SECONDS]
-    if not local:
-        return None
-    best_sample = max(local, key=lambda s: (s[2], -s[0], -s[1].id))
-    pbest = best_sample[1]
-    # Shared memory is valid only when originally observed by another vehicle
-    # and belongs to the current vehicle's assigned K-means region.
-    shared = [r for r in global_observations
-              if r['uav_id'] != state['id']
-              and r['cell'].id in state['allowed_ids']
-              and 0 <= now-r['time'] <= MEMORY_WINDOW_SECONDS]
-    shared_best = max(shared, key=lambda r: (r['concentration'], -r['cell'].id)) if shared else None
-    ref_conc = shared_best['concentration'] if shared_best else best_sample[2]
-    ref = _bounded_smoke_score(ref_conc)
-    if ref >= 0.70:
-        wc, wp, wb, wg = (0.50, 0.15, 0.30, 0.05)
+    samples = [s for s in state['samples'] if 0 <= now - s[0] <= MEMORY_WINDOW_SECONDS]
+    length_scale = 2.0 * _cell_spacing_m(state['route'], current)
+    wind_dir = state.get('wind_direction_deg', 0.0)
+    wind_speed = state.get('plume_advection_mps', 0.0)
+    def estimate(c, obs=samples):
+        return _bounded_smoke_score(_local_observation_estimate(
+            c, obs, now, length_scale, wind_dir, wind_speed))
+
+    visited = state.get('search_visited', {})
+    scored_visited = [(estimate(c), c) for c in visited.values()]
+    informative = [(score, c) for score, c in scored_visited if score > 1e-12]
+    # Do not fabricate a pbest from an arbitrary cell ID when all evidence expired.
+    if informative:
+        pbest_evidence, pbest = max(informative, key=lambda x: (x[0], -x[1].id))
     else:
-        wc, wp, wb, wg = (0.40, 0.15, 0.15, 0.30)
-    length_scale = 2.0 * max(1.0, min(_meters_between(current_cell, c) for c in neighbors))
-    current_est = _bounded_smoke_score(_local_observation_estimate(current_cell, local, now, length_scale))
-    scored = []
+        pbest, pbest_evidence = current, 0.0
+    state['pbest'] = (now, pbest, pbest_evidence)
+
+    shared = [r for r in global_observations
+              if r['uav_id'] != state['id'] and r['cell'].id in state['allowed_ids']
+              and 0 <= now - r['time'] <= MEMORY_WINDOW_SECONDS]
+    # Shared records evaluated with THEIR measured evidence, without allowing
+    # the target controller to access any unobserved ground-truth concentration.
+    # Compare shared samples on the same normalized evidence scale as pbest.
+    shared_best = max(shared, key=lambda r: (_bounded_smoke_score(r['concentration']), -r['cell'].id)) if shared else None
+    shared_evidence = (_bounded_smoke_score(shared_best['concentration'])
+                       if shared_best else None)
+    state['eligible_shared_count'] += len(shared)
+    if shared_best:
+        state['shared_best_used'] += 1
+    reference = shared_evidence if shared_evidence is not None else pbest_evidence
+    wc, wp, wb, wg = ((0.50, 0.15, 0.30, 0.05) if reference >= 0.70
+                      else (0.40, 0.15, 0.15, 0.30))
+    current_estimate = estimate(current)
+    candidates = []
     for c in neighbors:
-        candidate_est = _local_observation_estimate(c, local, now, length_scale)
-        evidence = _bounded_smoke_score(candidate_est)
-        p_dist = _meters_between(c, pbest)
-        d_p = 1.0/(1.0+p_dist/1.0)
-        d_b = (1.0/(1.0+_meters_between(c, shared_best['cell'])/1.0)) if shared_best else 0.0
-        gain = evidence-current_est        # signed difference per Eq.(25)
-        risk = max(0.0, min(1.0, float(c.risk or 1.0)/5.0))
-        base = wc*evidence + wp*d_p + (wb*d_b if shared_best else 0.0) + wg*gain + 0.05*risk
-        # Paper Appendix B: *0.8 for last two positions; signed caveat applies.
+        evidence = estimate(c)
+        dp = 1.0 / (1.0 + _meters_between(c, pbest) / 1.0)  # Eq.(24): d0=1m
+        db = (1.0 / (1.0 + _meters_between(c, shared_best['cell']) / 1.0)
+              if shared_best else 0.0)
+        risk = max(0.0, min(1.0, float(c.risk or 1.0) / 5.0))
+        base = wc*evidence + wp*dp + (wb*db if shared_best else 0.0) \
+               + wg*(evidence-current_estimate) + 0.05*risk
         if c.id in state['history'][-2:]:
             base *= 0.80
-        scored.append((base, c))
-    # Compute direction memory *once per completed decision* (not per candidate).
-    best_base, preferred = max(
-        scored, key=lambda item: (item[0], -_meters_between(current_cell, item[1]), -item[1].id)
-    )
-    lam = 0.4 + 0.5/(1.0+math.exp(10.0*(ref-0.5)))
-    direction = _vector_direction(current_cell, preferred)
-    prev_e, prev_n = state['memory']
-    memory = (lam*prev_e+(1-lam)*direction[0],
-              lam*prev_n+(1-lam)*direction[1])
-    state['memory'] = memory
-    state['swarm_iterations'] += 1
-    def sort_key(item):
-        base, c = item
-        d = _vector_direction(current_cell, c)
-        score = base + 0.10*(memory[0]*d[0]+memory[1]*d[1])
-        return (score, -_meters_between(current_cell, c), -c.id)
-    return max(scored, key=sort_key)[1]
+        candidates.append((base, c))
 
+    preferred = max(candidates, key=lambda item: (
+        item[0], -_meters_between(current, item[1]), -item[1].id))[1]
+    lam = 0.4 + 0.5 / (1.0 + math.exp(10.0 * (pbest_evidence - 0.5)))
+    direction = _vector_direction(current, preferred)
+    old_e, old_n = state['memory']
+    memory = (lam*old_e+(1-lam)*direction[0],
+              lam*old_n+(1-lam)*direction[1])
+    def final_rank(item):
+        base, c = item
+        d = _vector_direction(current, c)
+        return (base + 0.10*(memory[0]*d[0]+memory[1]*d[1]),
+                -_meters_between(current,c), -c.id)
+
+    # Critical simulation safeguard: a previously visited neighbor cannot
+    # monopolize the flight when there are unseen neighbors. All neighbors
+    # were still evaluated by the paper score above. This is a deliberate
+    # anti-oscillation modification, NOT claimed as identical to paper A1.
+    unseen = [item for item in candidates if item[1].id not in state['observed_ids']]
+    if unseen:
+        chosen = max(unseen, key=final_rank)[1]
+    else:
+        chosen = _pso_recovery_step(state)
+        # Recovery count is committed by the scheduler, not here.
+    if chosen is None:
+        return None
+    # Proposal only: scheduler commits counters and memory after budget validation.
+    state['pending_pso'] = {
+        'cell_id': chosen.id, 'memory': memory,
+        'revisit': int(chosen.id in state['observed_ids']),
+        'recovery': int(not unseen),
+    }
+    return chosen
 
 def _run_fleet_events(
     strategy: str, label: str, routes_by_uav: Dict[int, Dict],
@@ -536,6 +616,7 @@ def _run_fleet_events(
     smoke_threshold: float = 0.5, search_angle_deg: float = 30.0,
     search_radius_m: Optional[float] = None,
     observation_seconds: float = OBSERVATION_SECONDS,
+    mission_horizon_seconds: Optional[float] = DEFAULT_MISSION_HORIZON_SECONDS,
 ) -> Dict:
     """Discrete-event fleet simulator; all aircraft fly *simultaneously*.
 
@@ -547,6 +628,8 @@ def _run_fleet_events(
         raise ValueError('uav_speed_mps phải hữu hạn và > 0.')
     if not math.isfinite(observation_seconds) or observation_seconds < 0:
         raise ValueError('observation_seconds phải hữu hạn và >= 0.')
+    if mission_horizon_seconds is not None and (not math.isfinite(mission_horizon_seconds) or mission_horizon_seconds <= 0):
+        raise ValueError('mission_horizon_seconds phải hữu hạn và > 0, hoặc None.')
     if not 0 < smoke_threshold <= 1.0:
         raise ValueError('smoke_threshold phải thuộc (0,1].')
     if fire_cell is not None and (smoke_radius_m is None or not math.isfinite(smoke_radius_m) or smoke_radius_m <= 0):
@@ -577,7 +660,12 @@ def _run_fleet_events(
             'observed_ids': set(), 'samples': [], 'history': [],
             'active': False, 'search_start': None, 'priority': [],
             'processed_smoke': set(), 'memory': (0.0,0.0),
-            'swarm_iterations': 0,
+            'swarm_iterations': 0, 'pbest': None,
+            'search_visited': {}, 'eligible_shared_count': 0,
+            'shared_best_used': 0, 'pso_revisits': 0, 'pso_recovery_steps': 0,
+            'wind_direction_deg': wind_direction_deg,
+            'plume_advection_mps': 0.0,  # stationary cone: no dynamic wind velocity
+            'pending_pso': None, 'search_triggers': 0,
         }
         heapq.heappush(heap, (observation_seconds,
                               uid, seq, launch, 0.0, 'launch'))
@@ -595,8 +683,12 @@ def _run_fleet_events(
     winner_mode = None
     wind_events = []
     global_observations = []
+    horizon_reached = False
     while heap:
         now, uid, _, cell, leg_distance, mode = heapq.heappop(heap)
+        if mission_horizon_seconds is not None and now > mission_horizon_seconds + 1e-9:
+            horizon_reached = True
+            break
         st = states[uid]
         st['current'], st['time'] = cell, now
         st['distance'] += leg_distance
@@ -634,15 +726,25 @@ def _run_fleet_events(
             break
 
         if strategy in ('kmeans_wind','kmeans_swarm'):
-            if not st['active'] and concentration >= smoke_threshold:
+            if (not st['active'] and concentration >= smoke_threshold
+                    and cell.id not in st['processed_smoke']):
                 st['active'] = True
+                st['search_triggers'] += 1
+                st['processed_smoke'].add(cell.id) if strategy == 'kmeans_swarm' else None
                 st['search_start'] = now
                 st['priority'] = []
                 st['memory'] = (0.0,0.0)
+                st['pbest'] = None
+                st['search_visited'] = {cell.id: cell}
+                # Wind candidate generation is performed below on the first trigger.
+            if st['active'] and strategy == 'kmeans_swarm':
+                st['search_visited'][cell.id] = cell
             if st['active'] and now >= st['search_start']+LOCAL_SEARCH_BUDGET_SECONDS:
                 st['active'] = False
                 st['priority'] = []
                 st['search_start'] = None
+                st['pbest'] = None
+                st['search_visited'] = {}
 
         next_cell = None
         next_mode = 'patrol'
@@ -671,12 +773,15 @@ def _run_fleet_events(
                 st['active'] = False
                 st['search_start'] = None
         if strategy == 'kmeans_swarm' and st['active']:
+            st['pending_pso'] = None
             next_cell = _pick_discrete_pso_cell(st, now, global_observations)
             if next_cell is not None:
                 next_mode = 'swarm_candidate'
             else:
                 st['active'] = False
                 st['search_start'] = None
+                st['pbest'] = None
+                st['search_visited'] = {}
 
         # Reject candidate if it cannot be observed within local 10m budget.
         if (next_cell is not None and next_mode != 'patrol' and st['search_start'] is not None
@@ -686,6 +791,19 @@ def _run_fleet_events(
             st['priority'] = []
             st['active'] = False
             st['search_start'] = None
+            st['pbest'] = None
+            st['search_visited'] = {}
+            st['pending_pso'] = None
+
+        # Commit only an accepted PSO proposal.
+        if next_cell is not None and next_mode == 'swarm_candidate':
+            pending = st.get('pending_pso')
+            if pending and pending['cell_id'] == next_cell.id:
+                st['memory'] = pending['memory']
+                st['swarm_iterations'] += 1
+                st['pso_revisits'] += pending['revisit']
+                st['pso_recovery_steps'] += pending['recovery']
+        st['pending_pso'] = None
 
         # Continue the saved K-means route, skipping visited rerouting cells.
         if next_cell is None:
@@ -716,12 +834,22 @@ def _run_fleet_events(
         'smoke_threshold': smoke_threshold,
         'movement_mode_when_detected': winner_mode,
         'travel_distance_m': round(st['distance'],2) if st else None,
+        'fleet_travel_distance_m': round(sum(x['distance'] for x in states.values()), 2),
+        'unique_checked_cells': len(set().union(*(x['observed_ids'] for x in states.values()))),
+        'search_triggers': sum(x['search_triggers'] for x in states.values()),
+        'mission_horizon_seconds': mission_horizon_seconds,
+        'termination_reason': 'detected' if success else ('mission_horizon' if horizon_reached else 'routes_exhausted'),
         'elapsed_simulation_seconds': round(last_time,6),
         'wind_reroute_events': wind_events,
         'swarm_active': any(sta['swarm_iterations']>0 for sta in states.values()),
         'swarm_iterations': sum(sta['swarm_iterations'] for sta in states.values()),
-        'broadcast_events': [],  # one UAV per region; cross-region best prohibited
-        'pbest_concentration': max((s[2] for s in (st['samples'] if st else [])), default=None),
+        'pso_revisits': sum(sta['pso_revisits'] for sta in states.values()),
+        'pso_recovery_steps': sum(sta['pso_recovery_steps'] for sta in states.values()),
+        'shared_best_used': sum(sta['shared_best_used'] for sta in states.values()),
+        'eligible_shared_count': sum(sta['eligible_shared_count'] for sta in states.values()),
+        'broadcast_events': [],  # cross-region movement prohibited
+        'pso_variant': '2D ACAK-LoPSO-inspired: 8-neighbor scoring + exploration guard + BFS dead-end recovery; static plume',
+        'pbest_concentration': (st['pbest'][2] if st and st['pbest'] else None),
         'gbest_concentration': None,
         'gbest_cell_id': None,
     }
@@ -735,11 +863,13 @@ def simulate_no_kmeans(
     routes_by_uav: Dict[int, Dict], fire_cell_id: int, uav_speed_mps: float,
     fire_cell=None, smoke_radius_m=None, wind_direction_deg=0.0,
     smoke_angle_deg=35.0, smoke_threshold=0.50,
+    mission_horizon_seconds: Optional[float] = DEFAULT_MISSION_HORIZON_SECONDS,
 ) -> Dict:
     return _run_fleet_events(
         'no_kmeans', '1) Không K-means', routes_by_uav,
         fire_cell_id, uav_speed_mps, fire_cell, smoke_radius_m,
         wind_direction_deg, smoke_angle_deg, smoke_threshold,
+        mission_horizon_seconds=mission_horizon_seconds,
     )
 
 
@@ -747,11 +877,13 @@ def simulate_kmeans(
     routes_by_uav: Dict[int, Dict], fire_cell_id: int, uav_speed_mps: float,
     fire_cell=None, smoke_radius_m=None, wind_direction_deg=0.0,
     smoke_angle_deg=35.0, smoke_threshold=0.50,
+    mission_horizon_seconds: Optional[float] = DEFAULT_MISSION_HORIZON_SECONDS,
 ) -> Dict:
     return _run_fleet_events(
         'kmeans', '2) Có K-means', routes_by_uav,
         fire_cell_id, uav_speed_mps, fire_cell, smoke_radius_m,
         wind_direction_deg, smoke_angle_deg, smoke_threshold,
+        mission_horizon_seconds=mission_horizon_seconds,
     )
 
 
@@ -760,12 +892,14 @@ def simulate_kmeans_wind(
     wind_direction_deg: float, uav_speed_mps: float, smoke_angle_deg: float,
     smoke_radius_m: float, search_angle_deg: float, search_radius_m: float,
     smoke_threshold: float,
+    mission_horizon_seconds: Optional[float] = DEFAULT_MISSION_HORIZON_SECONDS,
 ) -> Dict:
     return _run_fleet_events(
         'kmeans_wind', '3) K-means + ngưỡng khói + hướng gió',
         routes_by_uav, fire_cell.id, uav_speed_mps, fire_cell,
         smoke_radius_m, wind_direction_deg, smoke_angle_deg,
         smoke_threshold, search_angle_deg, search_radius_m,
+        mission_horizon_seconds=mission_horizon_seconds,
     )
 
 
@@ -773,11 +907,13 @@ def simulate_kmeans_swarm(
     cells: List[GridCell], routes_by_uav: Dict[int, Dict], fire_cell: GridCell,
     uav_speed_mps: float, smoke_radius_m: float, smoke_threshold: float,
     wind_direction_deg: float = 0.0, smoke_angle_deg: float = 35.0,
+    mission_horizon_seconds: Optional[float] = DEFAULT_MISSION_HORIZON_SECONDS,
 ) -> Dict:
     return _run_fleet_events(
         'kmeans_swarm', '4) K-means + ngưỡng khói + Swarm/PSO',
         routes_by_uav, fire_cell.id, uav_speed_mps, fire_cell,
         smoke_radius_m, wind_direction_deg, smoke_angle_deg, smoke_threshold,
+        mission_horizon_seconds=mission_horizon_seconds,
     )
 
 
@@ -792,6 +928,7 @@ def compare_detection_strategies(
     search_radius_m: Optional[float] = None,
     smoke_threshold: float = 0.50,
     uav_speed: Optional[float] = None,
+    mission_horizon_seconds: Optional[float] = DEFAULT_MISSION_HORIZON_SECONDS,
 ) -> Dict:
     """
     Hàm chính gọi từ API.
@@ -933,6 +1070,7 @@ def compare_detection_strategies(
             wind_direction_deg=wind_direction_deg,
             smoke_angle_deg=smoke_angle_deg,
             smoke_threshold=smoke_threshold,
+            mission_horizon_seconds=mission_horizon_seconds,
         ),
 
         # -----------------------------------------------------
@@ -948,6 +1086,7 @@ def compare_detection_strategies(
             wind_direction_deg=wind_direction_deg,
             smoke_angle_deg=smoke_angle_deg,
             smoke_threshold=smoke_threshold,
+            mission_horizon_seconds=mission_horizon_seconds,
         ),
 
         # -----------------------------------------------------
@@ -965,6 +1104,7 @@ def compare_detection_strategies(
             search_angle_deg=search_angle_deg,
             search_radius_m=search_radius_m,
             smoke_threshold=smoke_threshold,
+            mission_horizon_seconds=mission_horizon_seconds,
         ),
 
         # -----------------------------------------------------
@@ -980,6 +1120,7 @@ def compare_detection_strategies(
             smoke_threshold=smoke_threshold,
             wind_direction_deg=wind_direction_deg,
             smoke_angle_deg=smoke_angle_deg,
+            mission_horizon_seconds=mission_horizon_seconds,
         ),
 
     ]
@@ -1011,6 +1152,7 @@ def compare_detection_strategies(
             "smoke_radius_m": smoke_radius_m,
 
             "smoke_threshold": smoke_threshold,
+            "mission_horizon_seconds": mission_horizon_seconds,
 
             "search_angle_deg": search_angle_deg,
 
